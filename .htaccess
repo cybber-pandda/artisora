@@ -1,0 +1,74 @@
+#==========================================================================
+# ARTISORA — ROOT .htaccess
+#==========================================================================
+# Purpose: Redirect ALL requests to the /public directory.
+#
+# On shared hosting (like Hostinger), the document root often points to
+# the Laravel project root rather than /public. This file ensures that
+# every request is forwarded to public/index.php so Laravel can handle
+# routing properly — without exposing sensitive files like .env,
+# composer.json, or the /vendor directory.
+#==========================================================================
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    #----------------------------------------------------------------------
+    # FORCE HTTPS
+    #----------------------------------------------------------------------
+    # Redirect all HTTP traffic to HTTPS for security.
+    # The %{HTTPS} variable is "off" when the request is not HTTPS.
+    # The [L,R=301] flags issue a 301 permanent redirect and stop further
+    # rule processing.
+    #----------------------------------------------------------------------
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    #----------------------------------------------------------------------
+    # REDIRECT TO /public FOLDER
+    #----------------------------------------------------------------------
+    # If the request is NOT already targeting the /public directory,
+    # internally rewrite it so Apache serves from /public.
+    # This keeps URLs clean — users see "/" instead of "/public/".
+    #----------------------------------------------------------------------
+    RewriteCond %{REQUEST_URI} !^/public/
+    RewriteRule ^(.*)$ /public/$1 [L]
+</IfModule>
+
+#==========================================================================
+# SECURITY HEADERS
+#==========================================================================
+# These headers protect against common web vulnerabilities.
+# They are set here as a safety net; Laravel middleware can also set them.
+#==========================================================================
+<IfModule mod_headers.c>
+    # Prevent MIME-type sniffing (e.g., treating a .txt as .html)
+    Header set X-Content-Type-Options "nosniff"
+
+    # Block the page if a reflected XSS attack is detected (legacy browsers)
+    Header set X-XSS-Protection "1; mode=block"
+
+    # Prevent clickjacking by disallowing iframe embedding (except same-origin)
+    Header set X-Frame-Options "SAMEORIGIN"
+
+    # Only send the origin (not full URL) as referrer to external sites
+    Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+#==========================================================================
+# BLOCK ACCESS TO SENSITIVE FILES
+#==========================================================================
+# Deny direct access to dotfiles (.env, .git, .htaccess in subdirs, etc.)
+# This is a critical security measure for shared hosting.
+#==========================================================================
+<FilesMatch "^\.">
+    # Apache 2.4+
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    # Apache 2.2 fallback
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

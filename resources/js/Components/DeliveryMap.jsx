@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { LerpAnimator } from '@/Utils/LerpAnimator';
 
 const KEY       = import.meta.env.VITE_MAPTILER_API_KEY;
 const MAP_STYLE = `https://api.maptiler.com/maps/streets-v2/style.json?key=${KEY}`;
@@ -74,6 +75,8 @@ async function fetchDrivingRoute(from, to) {
  * DeliveryMap — reusable MapLibre GL map with LIVE road-following rerouting.
  *
  * Uses OSRM (free) for real road routing — just like Waze / Google Maps.
+ * Features Kalman-filtered positions, lerp animation, and synchronized
+ * route line updates.
  *
  * Props:
  *  pickup:         { lat, lng }  — pickup point (green pin)
@@ -85,7 +88,7 @@ async function fetchDrivingRoute(from, to) {
  *  className:      string
  *  onRouteInfo:    (info) => void — callback with { durationMin, distanceKm }
  */
-export default function DeliveryMap({
+function DeliveryMapInner({
     pickup,
     dropoff,
     driverLocation,
@@ -101,6 +104,8 @@ export default function DeliveryMap({
     const routePopup          = useRef(null);
     const lastRerouteTime     = useRef(0);
     const initialRouteDrawn   = useRef(false);
+    const routeGeometryRef    = useRef(null);   // current OSRM route geometry
+    const lerpRef             = useRef(null);    // LerpAnimator instance
     const [mapReady, setMapReady] = useState(false);
 
     // ── Bootstrap map ─────────────────────────────────────────────
@@ -163,11 +168,54 @@ export default function DeliveryMap({
             fitAllPoints(map, pickup, dropoff, driverLocation);
         });
 
+        // ── Create lerp animator ──────────────────────────────
+        lerpRef.current = new LerpAnimator({
+            duration: 2500, // 2.5s ease-out as requested
+            onFrame: ({ lat, lng }) => {
+                if (!mapRef.current) return;
+
+                // Slide the driver marker smoothly
+                if (driverMarker.current) {
+                    driverMarker.current.setLngLat([lng, lat]);
+                }
+
+                // ── Synchronize the route line's leading edge ──
+                // Splice the current interpolated position onto the
+                // front of the route geometry so the line "follows" the icon.
+                if (routeGeometryRef.current && mapRef.current.getSource('active-route')) {
+                    const coords = routeGeometryRef.current.coordinates;
+                    // Replace the first coordinate with the interpolated position
+                    const updatedCoords = [[lng, lat], ...coords.slice(1)];
+                    mapRef.current.getSource('active-route').setData({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: updatedCoords,
+                        },
+                    });
+                }
+            },
+            onComplete: ({ lat, lng }) => {
+                // Pan to keep driver visible at animation end (less jarring)
+                if (mapRef.current) {
+                    mapRef.current.easeTo({
+                        center: [lng, lat],
+                        duration: 600,
+                    });
+                }
+            },
+        });
+
         return () => {
+            if (lerpRef.current) {
+                lerpRef.current.destroy();
+                lerpRef.current = null;
+            }
             map.remove();
             mapRef.current = null;
             setMapReady(false);
             initialRouteDrawn.current = false;
+            routeGeometryRef.current = null;
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -210,98 +258,30 @@ export default function DeliveryMap({
         // Fetch real road route from driver's current position → dropoff
         const routeData = await fetchDrivingRoute(driverLoc, dropoff);
 
-        // ── Clean up old active route layers ──────────────────
-        ['active-route-glow', 'active-route-shadow', 'active-route', 'active-route-dash'].forEach(id => removeLayerSafe(map, id));
-        removeSourceSafe(map, 'active-route');
-
-        // Clean up old completed segment
-        removeLayerSafe(map, 'completed-segment');
-        removeSourceSafe(map, 'completed-segment');
-
         if (!routeData) {
-            // If all routing APIs fail, draw straight line as last resort
-            addStraightLine(map, driverLoc, dropoff, 'active-route');
+            // If all routing APIs fail, update the source in-place with a straight line
+            const straightGeom = {
+                type: 'LineString',
+                coordinates: [
+                    [driverLoc.lng, driverLoc.lat],
+                    [dropoff.lng, dropoff.lat],
+                ],
+            };
+            updateOrCreateRouteSource(map, 'active-route', straightGeom);
+            routeGeometryRef.current = straightGeom;
             return;
         }
 
-        // ── Draw ACTIVE route (driver → dropoff) ─────────────
-        map.addSource('active-route', {
-            type: 'geojson',
-            data: { type: 'Feature', geometry: routeData.geometry },
-        });
-
-        // Glow (outermost — gives the route a "selected" feel like Google Maps)
-        map.addLayer({
-            id:     'active-route-glow',
-            type:   'line',
-            source: 'active-route',
-            paint: {
-                'line-color':   '#3b82f6',
-                'line-width':   14,
-                'line-opacity': 0.06,
-                'line-blur':    6,
-            },
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-        });
-
-        // Shadow (wider, darker)
-        map.addLayer({
-            id:     'active-route-shadow',
-            type:   'line',
-            source: 'active-route',
-            paint: {
-                'line-color':   '#1e40af',
-                'line-width':   8,
-                'line-opacity': 0.18,
-            },
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-        });
-
-        // Main route line (vivid blue — like Google Maps / Waze)
-        map.addLayer({
-            id:     'active-route',
-            type:   'line',
-            source: 'active-route',
-            paint: {
-                'line-color':   '#4285F4',
-                'line-width':   5,
-                'line-opacity': 0.95,
-            },
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-        });
-
-        // White dash overlay (marching ants for direction indication)
-        map.addLayer({
-            id:     'active-route-dash',
-            type:   'line',
-            source: 'active-route',
-            paint: {
-                'line-color':     '#ffffff',
-                'line-width':     2,
-                'line-opacity':   0.45,
-                'line-dasharray': [0, 2, 2],
-            },
-            layout: { 'line-cap': 'round', 'line-join': 'round' },
-        });
+        // ── Update route geometry (in-place setData, no teardown) ──
+        routeGeometryRef.current = routeData.geometry;
+        updateOrCreateRouteSource(map, 'active-route', routeData.geometry);
 
         // ── Draw COMPLETED segment (pickup → driver) ─────────
         if (pickup?.lat && pickup?.lng) {
             const completedRoute = await fetchDrivingRoute(pickup, driverLoc);
             if (completedRoute) {
-                map.addSource('completed-segment', {
-                    type: 'geojson',
-                    data: { type: 'Feature', geometry: completedRoute.geometry },
-                });
-                map.addLayer({
-                    id:     'completed-segment',
-                    type:   'line',
-                    source: 'completed-segment',
-                    paint: {
-                        'line-color':   '#86efac',
-                        'line-width':   4,
-                        'line-opacity': 0.5,
-                    },
-                    layout: { 'line-cap': 'round', 'line-join': 'round' },
+                updateOrCreateRouteSource(map, 'completed-segment', completedRoute.geometry, {
+                    color: '#86efac', width: 4, opacity: 0.5,
                 });
             }
         }
@@ -345,25 +325,29 @@ export default function DeliveryMap({
 
     }, [dropoff, pickup, status, onRouteInfo]);
 
-    // ── Move driver marker + trigger reroute ──────────────────────
+    // ── Move driver marker (LERP) + trigger reroute ───────────────
     useEffect(() => {
         if (!mapReady || !mapRef.current) return;
         if (!driverLocation?.lat || !driverLocation?.lng) return;
 
-        // Update marker position (smooth)
-        if (driverMarker.current) {
-            driverMarker.current.setLngLat([driverLocation.lng, driverLocation.lat]);
-        } else {
+        // Ensure driver marker exists
+        if (!driverMarker.current) {
             driverMarker.current = createDriverMarker(mapRef.current, driverLocation);
+            // First position — jump immediately, don't animate
+            if (lerpRef.current) {
+                lerpRef.current.jumpTo(driverLocation);
+            }
+        } else {
+            // Subsequent positions — smooth lerp animation (2.5s ease-out)
+            if (lerpRef.current) {
+                lerpRef.current.animateTo(driverLocation);
+            } else {
+                // Fallback if lerp somehow not initialized
+                driverMarker.current.setLngLat([driverLocation.lng, driverLocation.lat]);
+            }
         }
 
-        // Pan to keep driver visible
-        mapRef.current.easeTo({
-            center: [driverLocation.lng, driverLocation.lat],
-            duration: 900,
-        });
-
-        // Trigger live reroute (will follow real roads)
+        // Trigger live reroute (will follow real roads, throttled to 15s)
         doReroute(driverLocation);
     }, [driverLocation?.lat, driverLocation?.lng, mapReady, doReroute]);
 
@@ -374,6 +358,9 @@ export default function DeliveryMap({
 
         const map = mapRef.current;
 
+        // Stop any running animation
+        if (lerpRef.current) lerpRef.current.stop();
+
         // Remove active route artifacts
         ['active-route-glow', 'active-route-shadow', 'active-route', 'active-route-dash'].forEach(id => removeLayerSafe(map, id));
         removeSourceSafe(map, 'active-route');
@@ -381,6 +368,8 @@ export default function DeliveryMap({
         removeSourceSafe(map, 'completed-segment');
         removeLayerSafe(map, 'overview-route');
         removeSourceSafe(map, 'overview-route');
+
+        routeGeometryRef.current = null;
 
         if (routePopup.current) {
             routePopup.current.remove();
@@ -442,6 +431,26 @@ export default function DeliveryMap({
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  REACT.MEMO — avoid re-renders when parent state changes
+//  Only re-render when location, status, or route endpoints change
+// ═══════════════════════════════════════════════════════════════════
+const DeliveryMap = memo(DeliveryMapInner, (prevProps, nextProps) => {
+    // Return true = skip re-render. Return false = re-render.
+    return (
+        prevProps.driverLocation?.lat === nextProps.driverLocation?.lat &&
+        prevProps.driverLocation?.lng === nextProps.driverLocation?.lng &&
+        prevProps.status === nextProps.status &&
+        prevProps.pickup?.lat === nextProps.pickup?.lat &&
+        prevProps.pickup?.lng === nextProps.pickup?.lng &&
+        prevProps.dropoff?.lat === nextProps.dropoff?.lat &&
+        prevProps.dropoff?.lng === nextProps.dropoff?.lng &&
+        prevProps.className === nextProps.className
+    );
+});
+
+export default DeliveryMap;
+
+// ═══════════════════════════════════════════════════════════════════
 //  HELPERS
 // ═══════════════════════════════════════════════════════════════════
 
@@ -450,6 +459,76 @@ function removeLayerSafe(map, id) {
 }
 function removeSourceSafe(map, id) {
     try { if (map.getSource(id)) map.removeSource(id); } catch {}
+}
+
+/**
+ * Update an existing GeoJSON source in-place via setData(),
+ * or create it with full styling if it doesn't exist yet.
+ *
+ * This avoids the flash caused by remove → re-add cycle.
+ */
+function updateOrCreateRouteSource(map, sourceId, geometry, style) {
+    const geojson = { type: 'Feature', geometry };
+    const existing = map.getSource(sourceId);
+
+    if (existing) {
+        // ── In-place update — no layer teardown, no flash ──
+        existing.setData(geojson);
+        return;
+    }
+
+    // ── First time: create source + layers ──
+    if (sourceId === 'active-route') {
+        map.addSource('active-route', { type: 'geojson', data: geojson });
+
+        // Glow (outermost)
+        map.addLayer({
+            id: 'active-route-glow', type: 'line', source: 'active-route',
+            paint: { 'line-color': '#3b82f6', 'line-width': 14, 'line-opacity': 0.06, 'line-blur': 6 },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+        // Shadow
+        map.addLayer({
+            id: 'active-route-shadow', type: 'line', source: 'active-route',
+            paint: { 'line-color': '#1e40af', 'line-width': 8, 'line-opacity': 0.18 },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+        // Main line (vivid blue)
+        map.addLayer({
+            id: 'active-route', type: 'line', source: 'active-route',
+            paint: { 'line-color': '#4285F4', 'line-width': 5, 'line-opacity': 0.95 },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+        // White dash overlay
+        map.addLayer({
+            id: 'active-route-dash', type: 'line', source: 'active-route',
+            paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.45, 'line-dasharray': [0, 2, 2] },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+    } else if (sourceId === 'completed-segment') {
+        map.addSource('completed-segment', { type: 'geojson', data: geojson });
+        map.addLayer({
+            id: 'completed-segment', type: 'line', source: 'completed-segment',
+            paint: {
+                'line-color':   style?.color   ?? '#86efac',
+                'line-width':   style?.width   ?? 4,
+                'line-opacity': style?.opacity ?? 0.5,
+            },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+    } else {
+        // Generic route source
+        map.addSource(sourceId, { type: 'geojson', data: geojson });
+        map.addLayer({
+            id: sourceId, type: 'line', source: sourceId,
+            paint: {
+                'line-color':   style?.color   ?? '#94a3b8',
+                'line-width':   style?.width   ?? 3,
+                'line-opacity': style?.opacity ?? 0.5,
+            },
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+        });
+    }
 }
 
 /** Add a route geometry to the map with styling */

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import AppLayout from '@/Layouts/AppLayout';
 import { Head } from '@inertiajs/react';
 import { motion } from 'framer-motion';
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
+import { GpsFilter } from '@/Utils/KalmanFilter';
 
 const STATUS_STEPS = [
     { key: 'pending_driver', label: 'Driver Assigned' },
@@ -66,15 +67,42 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
     const [polling, setPolling] = useState(true);
     const [routeInfo, setRouteInfo] = useState(null);
 
+    // ── Buyer-side Kalman filter for polled driver coordinates ─────
+    const gpsFilterRef = useRef(new GpsFilter());
+
     // ── Poll driver location every 10 seconds ────────────────────
     const poll = useCallback(async () => {
         if (!polling || delivery.status === 'delivered') return;
         try {
             const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
+
+            // The server already stores Kalman-filtered coords (driver_lat/lng),
+            // but apply buyer-side filtering too for extra smoothness on the poll.
+            let driverLat = data.driver_lat;
+            let driverLng = data.driver_lng;
+
+            if (driverLat && driverLng) {
+                const filtered = gpsFilterRef.current.filter(driverLat, driverLng);
+                // Only update coordinates if movement detected
+                if (!filtered.didMove) {
+                    // Still update non-GPS fields (status, eta)
+                    setDelivery(prev => ({
+                        ...prev,
+                        status:               data.status,
+                        estimated_arrival_at: data.estimated_arrival_at,
+                        adjusted_eta:         data.adjusted_eta,
+                    }));
+                    setLastUpdated(new Date());
+                    return;
+                }
+                driverLat = filtered.lat;
+                driverLng = filtered.lng;
+            }
+
             setDelivery(prev => ({
                 ...prev,
-                driver_lat:           data.driver_lat,
-                driver_lng:           data.driver_lng,
+                driver_lat:           driverLat,
+                driver_lng:           driverLng,
                 status:               data.status,
                 estimated_arrival_at: data.estimated_arrival_at,
                 adjusted_eta:         data.adjusted_eta,
@@ -94,20 +122,27 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
         ? new Date(delivery.adjusted_eta).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
         : null;
 
-    const driverLocation = delivery.driver_lat && delivery.driver_lng
-        ? { lat: delivery.driver_lat, lng: delivery.driver_lng }
-        : null;
+    // ── Memoize coordinate objects to prevent unnecessary DeliveryMap re-renders ──
+    const driverLocation = useMemo(() => (
+        delivery.driver_lat && delivery.driver_lng
+            ? { lat: delivery.driver_lat, lng: delivery.driver_lng }
+            : null
+    ), [delivery.driver_lat, delivery.driver_lng]);
 
-    const pickup  = delivery.pickup_lat  && delivery.pickup_lng
-        ? { lat: delivery.pickup_lat,  lng: delivery.pickup_lng }
-        : null;
+    const pickup = useMemo(() => (
+        delivery.pickup_lat && delivery.pickup_lng
+            ? { lat: delivery.pickup_lat, lng: delivery.pickup_lng }
+            : null
+    ), [delivery.pickup_lat, delivery.pickup_lng]);
 
     // Dropoff: use delivery coords → fallback to order coords (buyer's pinned address)
-    const dropoff = (delivery.dropoff_lat && delivery.dropoff_lng)
-        ? { lat: delivery.dropoff_lat, lng: delivery.dropoff_lng }
-        : (order.delivery_lat && order.delivery_lng)
-            ? { lat: order.delivery_lat, lng: order.delivery_lng }
-            : null;
+    const dropoff = useMemo(() => (
+        (delivery.dropoff_lat && delivery.dropoff_lng)
+            ? { lat: delivery.dropoff_lat, lng: delivery.dropoff_lng }
+            : (order.delivery_lat && order.delivery_lng)
+                ? { lat: order.delivery_lat, lng: order.delivery_lng }
+                : null
+    ), [delivery.dropoff_lat, delivery.dropoff_lng, order.delivery_lat, order.delivery_lng]);
 
     const isDelivered = delivery.status === 'delivered';
 

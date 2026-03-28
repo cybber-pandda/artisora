@@ -343,13 +343,17 @@ class DeliveryController extends Controller
         abort_if($delivery->driver_id !== Auth::id(), 403);
 
         $request->validate([
-            'lat' => ['required', 'numeric', 'between:-90,90'],
-            'lng' => ['required', 'numeric', 'between:-180,180'],
+            'lat'     => ['required', 'numeric', 'between:-90,90'],
+            'lng'     => ['required', 'numeric', 'between:-180,180'],
+            'raw_lat' => ['nullable', 'numeric', 'between:-90,90'],
+            'raw_lng' => ['nullable', 'numeric', 'between:-180,180'],
         ]);
 
         $delivery->update([
-            'driver_lat' => $request->lat,
-            'driver_lng' => $request->lng,
+            'driver_lat'     => $request->lat,
+            'driver_lng'     => $request->lng,
+            'raw_driver_lat' => $request->raw_lat ?? $request->lat,
+            'raw_driver_lng' => $request->raw_lng ?? $request->lng,
         ]);
 
         return response()->json(['ok' => true]);
@@ -492,6 +496,8 @@ class DeliveryController extends Controller
         return response()->json([
             'driver_lat'           => $delivery->driver_lat,
             'driver_lng'           => $delivery->driver_lng,
+            'raw_driver_lat'       => $delivery->raw_driver_lat,
+            'raw_driver_lng'       => $delivery->raw_driver_lng,
             'status'               => $delivery->status,
             'estimated_arrival_at' => $delivery->estimated_arrival_at?->toIso8601String(),
             'adjusted_eta'         => $delivery->adjustedEta(),

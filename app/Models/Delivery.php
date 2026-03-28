@@ -14,6 +14,7 @@ class Delivery extends Model
         'pickup_lat', 'pickup_lng',
         'dropoff_lat', 'dropoff_lng',
         'driver_lat', 'driver_lng',
+        'raw_driver_lat', 'raw_driver_lng',
         'estimated_arrival_at',
         'claimed_at', 'picked_up_at', 'delivered_at',
     ];
@@ -29,6 +30,8 @@ class Delivery extends Model
         'dropoff_lng'          => 'float',
         'driver_lat'           => 'float',
         'driver_lng'           => 'float',
+        'raw_driver_lat'       => 'float',
+        'raw_driver_lng'       => 'float',
         'weight'               => 'float',
         'buffer_time'          => 'integer',
     ];

@@ -59,17 +59,33 @@ function StepBar({ status }) {
     );
 }
 
-// ── GPS Sharing Hook ──────────────────────────────────────────────
+// ── GPS Sharing Hook (with Kalman filtering) ─────────────────────
+import { GpsFilter } from '@/Utils/KalmanFilter';
+
 function useGpsSharing(deliveryId, shouldAutoStart) {
     const [sharing, setSharing]   = useState(false);
     const [error, setError]       = useState(null);
     const [location, setLocation] = useState(null);
     const intervalRef = useRef(null);
+    const gpsFilterRef = useRef(new GpsFilter());
 
-    const sendLocation = useCallback((lat, lng) => {
-        axios.post(route('driver.location', deliveryId), { lat, lng })
-            .catch(() => {});
-        setLocation({ lat, lng });
+    const sendLocation = useCallback((rawLat, rawLng) => {
+        // ── Run raw GPS through the Kalman filter ──
+        const { lat, lng, didMove } = gpsFilterRef.current.filter(rawLat, rawLng);
+
+        // Always send to server (both filtered + raw for audit)
+        axios.post(route('driver.location', deliveryId), {
+            lat,           // filtered (smoothed) coordinates
+            lng,
+            raw_lat: rawLat, // original GPS reading for DB audit
+            raw_lng: rawLng,
+        }).catch(() => {});
+
+        // Only update React state if there was meaningful movement.
+        // This prevents unnecessary re-renders (and map updates) from jitter.
+        if (didMove) {
+            setLocation({ lat, lng });
+        }
     }, [deliveryId]);
 
     const start = useCallback(() => {
@@ -79,6 +95,9 @@ function useGpsSharing(deliveryId, shouldAutoStart) {
         }
         setSharing(true);
         setError(null);
+
+        // Reset the Kalman filter for a fresh delivery session
+        gpsFilterRef.current.reset();
 
         const send = () => {
             navigator.geolocation.getCurrentPosition(
