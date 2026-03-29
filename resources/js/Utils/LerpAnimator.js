@@ -42,6 +42,23 @@ function easeOutCubic(t) {
     return 1 - Math.pow(1 - t, 3);
 }
 
+// ── Angle Interpolation ──────────────────────────────────────────────
+
+/**
+ * Lerp between two angles using shortest-arc rotation.
+ * Prevents the van from spinning 350° to go from 5° to 355°;
+ * instead it rotates −10°.
+ *
+ * @param {number} fromDeg — starting angle in degrees
+ * @param {number} toDeg   — target angle in degrees
+ * @param {number} t       — progress [0..1]
+ * @returns {number} — interpolated angle in degrees
+ */
+function lerpAngle(fromDeg, toDeg, t) {
+    let diff = ((toDeg - fromDeg + 540) % 360) - 180; // shortest arc
+    return fromDeg + diff * t;
+}
+
 // ── LerpAnimator ─────────────────────────────────────────────────────
 
 export class LerpAnimator {
@@ -64,7 +81,9 @@ export class LerpAnimator {
         this._startTime = null;
         this._rafId = null;
         this._currentPos = null;     // last interpolated position
-        this._bearing = 0;           // current bearing (degrees)
+        this._bearing = 0;           // current display bearing (degrees)
+        this._bearingFrom = 0;       // bearing at animation start
+        this._bearingTo = 0;         // target bearing
         this._routeGeometry = null;  // current route coords for sync
     }
 
@@ -104,11 +123,15 @@ export class LerpAnimator {
     }
 
     /**
-     * Update the bearing value. Applied on the next animation frame.
-     * @param {number} deg — bearing in degrees
+     * Update the target bearing. The display bearing will smoothly
+     * interpolate toward this value over the animation duration
+     * using shortest-arc rotation.
+     *
+     * @param {number} deg — target bearing in degrees
      */
     setBearing(deg) {
-        this._bearing = deg;
+        this._bearingFrom = this._bearing;  // start from current display bearing
+        this._bearingTo = deg;
     }
 
     /**
@@ -168,6 +191,9 @@ export class LerpAnimator {
             const lat = this._from.lat + (this._to.lat - this._from.lat) * easedProgress;
             const lng = this._from.lng + (this._to.lng - this._from.lng) * easedProgress;
 
+            // ── Smooth bearing interpolation (shortest arc) ──
+            this._bearing = lerpAngle(this._bearingFrom, this._bearingTo, easedProgress);
+
             this._currentPos = { lat, lng };
 
             this.onFrame({ lat, lng, progress: easedProgress });
@@ -178,6 +204,7 @@ export class LerpAnimator {
                 this._tick();
             } else {
                 // Animation complete
+                this._bearing = this._bearingTo; // snap to exact target
                 this._rafId = null;
                 this.onComplete({ lat: this._to.lat, lng: this._to.lng });
             }

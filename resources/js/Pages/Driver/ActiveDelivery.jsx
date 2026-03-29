@@ -10,6 +10,8 @@ import {
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
 import { processGpsTick } from '@/Utils/SnapPipeline';
+import { useCompassHeading } from '@/Utils/useCompassHeading';
+import { computeIconState, resolveDisplayBearing, resolveHeadingSource } from '@/Utils/DriverIconState';
 
 // ── Status config ─────────────────────────────────────────────────
 const STATUS_CONFIG = {
@@ -78,6 +80,11 @@ function useLocationService(deliveryId, shouldAutoStart) {
     const [snapMode, setSnapMode]               = useState('snapped');
     const [activeBearing, setActiveBearing]     = useState(0);
     const [pipelineRouteGeo, setPipelineRouteGeo] = useState(null);
+    const [iconState, setIconState]             = useState('puck');
+    const [gpsAccuracy, setGpsAccuracy]         = useState(null);
+
+    // Compass heading hook
+    const compass = useCompassHeading();
 
     // Refs for mutable state that shouldn't trigger re-renders
     const watchIdRef           = useRef(null);
@@ -85,9 +92,11 @@ function useLocationService(deliveryId, shouldAutoStart) {
     const lastSnappedPointRef  = useRef(null);
     const accumulatedOffroadRef = useRef([]);
     const recentRawPositionsRef = useRef([]);
-    const routeCoordsRef       = useRef(null);   // canonical route coords from DeliveryMap
-    const originalRouteCoordsRef = useRef(null); // untouched original route
+    const routeCoordsRef       = useRef(null);
+    const originalRouteCoordsRef = useRef(null);
     const prevSnapModeRef      = useRef('snapped');
+    const lastKnownBearingRef  = useRef(0);
+    const iconStateRef         = useRef('puck');
 
     /**
      * Called by DeliveryMap via onRouteReady — stores the canonical route
@@ -110,6 +119,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
             accumulatedOffroad: accumulatedOffroadRef.current,
             recentRawPositions: recentRawPositionsRef.current,
             originalRouteCoords: originalRouteCoordsRef.current,
+            lastKnownBearing:   lastKnownBearingRef.current,
         });
 
         // null = fix was dropped by accuracy guard
@@ -120,30 +130,48 @@ function useLocationService(deliveryId, shouldAutoStart) {
         accumulatedOffroadRef.current = result.accumulatedOffroad;
         recentRawPositionsRef.current = result.recentRawPositions;
         prevSnapModeRef.current       = result.snapMode;
+        lastKnownBearingRef.current   = result.bearing;
 
-        // ── Update React state (triggers DeliveryMap re-render) ──
+        // ── Icon state: hysteresis speed check ──
+        const speed = position.coords.speed;  // m/s or null
+        const newIconState = computeIconState(speed, iconStateRef.current);
+        iconStateRef.current = newIconState;
+        setIconState(newIconState);
+
+        // ── Resolve display bearing: compass (puck) vs GPS (vehicle) ──
+        const displayBearing = resolveDisplayBearing(
+            newIconState,
+            compass.compassHeading,
+            result.bearing,         // pipeline GPS bearing
+            compass.compassAvailable,
+            lastKnownBearingRef.current
+        );
+
+        // ── Update React state ──
         const targetLng = result.targetPosition[0];
         const targetLat = result.targetPosition[1];
 
         setLocation({ lat: targetLat, lng: targetLng });
         setSnapMode(result.snapMode);
-        setActiveBearing(result.bearing);
+        setActiveBearing(displayBearing);
         setPipelineRouteGeo(result.routeGeometry);
+        setGpsAccuracy(position.coords.accuracy ?? null);
 
         // ── Throttled server send ──
         const now = Date.now();
         if (now - lastServerSendRef.current >= SERVER_SEND_INTERVAL_MS) {
             lastServerSendRef.current = now;
             axios.post(route('driver.location', deliveryId), {
-                lat:     targetLat,           // pipeline-processed (snapped or raw)
+                lat:     targetLat,
                 lng:     targetLng,
-                raw_lat: result.rawPosition[1], // original GPS for audit trail
+                raw_lat: result.rawPosition[1],
                 raw_lng: result.rawPosition[0],
                 snap_mode: result.snapMode,
-                bearing:   result.bearing,
+                bearing:   displayBearing,
+                heading_source: resolveHeadingSource(newIconState, compass.compassAvailable),
             }).catch(() => {});
         }
-    }, [deliveryId]);
+    }, [deliveryId, compass.compassHeading, compass.compassAvailable]);
 
     const start = useCallback(() => {
         if (!navigator.geolocation) {
@@ -158,6 +186,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
         accumulatedOffroadRef.current = [];
         recentRawPositionsRef.current = [];
         prevSnapModeRef.current       = 'snapped';
+        iconStateRef.current          = 'puck';
 
         // Use watchPosition for continuous GPS ticks
         watchIdRef.current = navigator.geolocation.watchPosition(
@@ -197,6 +226,12 @@ function useLocationService(deliveryId, shouldAutoStart) {
         sharing, start, stop, error, location,
         snapMode, activeBearing, pipelineRouteGeo,
         handleRouteReady,
+        // New dual-state
+        iconState, gpsAccuracy,
+        compassAvailable: compass.compassAvailable,
+        needsCompassPermission: compass.needsPermission,
+        requestCompassPermission: compass.requestCompassPermission,
+        compassPermissionState: compass.permissionState,
     };
 }
 
@@ -328,6 +363,8 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                         activeBearing={gps.activeBearing}
                         snapMode={gps.snapMode}
                         routeGeometry={gps.pipelineRouteGeo}
+                        driverIconState={gps.iconState}
+                        gpsAccuracy={gps.gpsAccuracy}
                         pickupLabel={`🎨 ${artist?.name ?? 'Artist'}`}
                         dropoffLabel={`📦 ${order.buyer_name}`}
                         className="h-80"
@@ -360,44 +397,61 @@ export default function ActiveDelivery({ delivery, order, artist }) {
 
                 {/* ── GPS STATUS CARD ─────────────────────────── */}
                 {isActive && (
-                    <div className={`flex items-center gap-3 rounded-xl border p-4 ${
+                    <div className={`flex flex-col gap-3 rounded-xl border p-4 ${
                         gps.sharing ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'
                     }`}>
-                        <div className={`flex h-10 w-10 items-center justify-center rounded-full ${
-                            gps.sharing ? 'bg-emerald-100' : 'bg-amber-100'
-                        }`}>
-                            <Navigation size={18} className={
-                                gps.sharing ? 'text-emerald-600 animate-pulse' : 'text-amber-600'
-                            } />
+                        <div className="flex items-center gap-3">
+                            <div className={`flex h-10 w-10 items-center justify-center rounded-full ${
+                                gps.sharing ? 'bg-emerald-100' : 'bg-amber-100'
+                            }`}>
+                                <Navigation size={18} className={
+                                    gps.sharing ? 'text-emerald-600 animate-pulse' : 'text-amber-600'
+                                } />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <p className={`text-sm font-semibold ${gps.sharing ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                    {gps.sharing ? '📡 Sharing Your Location Live' : '⚠️ Location Not Sharing'}
+                                </p>
+                                <p className="text-xs text-ink-muted">
+                                    {gps.sharing
+                                        ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · ${gps.iconState === 'puck' ? '🔵 Stationary' : '🚐 Moving'} · ${gps.compassAvailable ? '🧭 Compass' : '📡 GPS hdg'}`
+                                        : 'Tap "Share GPS" to let the buyer track your location.'}
+                                </p>
+                                {gps.error && <p className="mt-1 text-xs font-medium text-red-600">{gps.error}</p>}
+                            </div>
+                            {!gps.sharing && (
+                                <button
+                                    onClick={gps.start}
+                                    className="flex-shrink-0 rounded-xl bg-sienna px-4 py-2.5 text-xs font-bold text-white hover:bg-sienna-600 transition-colors"
+                                >
+                                    Share GPS
+                                </button>
+                            )}
+                            {gps.sharing && gps.location && (
+                                <div className="flex-shrink-0 text-right">
+                                    <p className="text-[10px] font-mono text-emerald-600">
+                                        {gps.location.lat.toFixed(4)}, {gps.location.lng.toFixed(4)}
+                                    </p>
+                                    <p className="text-[9px] font-mono text-emerald-500 mt-0.5">
+                                        {gps.snapMode === 'snapped' ? '⊙ snapped' : '◯ offroad'} · {gps.activeBearing.toFixed(0)}°
+                                    </p>
+                                </div>
+                            )}
                         </div>
-                        <div className="flex-1 min-w-0">
-                            <p className={`text-sm font-semibold ${gps.sharing ? 'text-emerald-700' : 'text-amber-700'}`}>
-                                {gps.sharing ? '📡 Sharing Your Location Live' : '⚠️ Location Not Sharing'}
-                            </p>
-                            <p className="text-xs text-ink-muted">
-                                {gps.sharing
-                                    ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · Updating continuously · Server sync every 10s`
-                                    : 'Tap "Share GPS" to let the buyer track your location.'}
-                            </p>
-                            {gps.error && <p className="mt-1 text-xs font-medium text-red-600">{gps.error}</p>}
-                        </div>
-                        {!gps.sharing && (
+
+                        {/* iOS Compass Permission Button */}
+                        {gps.needsCompassPermission && gps.sharing && (
                             <button
-                                onClick={gps.start}
-                                className="flex-shrink-0 rounded-xl bg-sienna px-4 py-2.5 text-xs font-bold text-white hover:bg-sienna-600 transition-colors"
+                                onClick={gps.requestCompassPermission}
+                                className="flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
                             >
-                                Share GPS
+                                🧭 Enable Compass for Direction Tracking
                             </button>
                         )}
-                        {gps.sharing && gps.location && (
-                            <div className="flex-shrink-0 text-right">
-                                <p className="text-[10px] font-mono text-emerald-600">
-                                    {gps.location.lat.toFixed(4)}, {gps.location.lng.toFixed(4)}
-                                </p>
-                                <p className="text-[9px] font-mono text-emerald-500 mt-0.5">
-                                    {gps.snapMode === 'snapped' ? '⊙ snapped' : '◯ offroad'} · {gps.activeBearing.toFixed(0)}°
-                                </p>
-                            </div>
+                        {gps.compassPermissionState === 'denied' && gps.sharing && (
+                            <p className="text-[10px] text-amber-600 text-center">
+                                Compass permission denied — using GPS heading only
+                            </p>
                         )}
                     </div>
                 )}

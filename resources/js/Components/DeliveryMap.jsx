@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { LerpAnimator } from '@/Utils/LerpAnimator';
+import { applyRotationOffset } from '@/Utils/BearingResolver';
 
 const KEY       = import.meta.env.VITE_MAPTILER_API_KEY;
 const MAP_STYLE = `https://api.maptiler.com/maps/streets-v2/style.json?key=${KEY}`;
@@ -81,6 +82,8 @@ export async function fetchDrivingRoute(from, to) {
  *  activeBearing:    number        — bearing for driver icon rotation (degrees)
  *  snapMode:         'snapped' | 'offroad' — current snap mode
  *  routeGeometry:    [number,number][]|null — route coords from pipeline (including tail)
+ *  driverIconState:  'puck' | 'vehicle'    — stationary puck vs moving vehicle
+ *  gpsAccuracy:      number | null         — GPS accuracy in meters (for circle layer)
  *  pickupLabel:      string
  *  dropoffLabel:     string
  *  className:        string
@@ -95,6 +98,8 @@ function DeliveryMapInner({
     activeBearing = 0,
     snapMode = null,
     routeGeometry = null,
+    driverIconState = 'vehicle',
+    gpsAccuracy = null,
     pickupLabel  = '🎨 Pickup',
     dropoffLabel = '📦 Buyer',
     className = '',
@@ -104,12 +109,15 @@ function DeliveryMapInner({
     const containerRef        = useRef(null);
     const mapRef              = useRef(null);
     const driverMarker        = useRef(null);
-    const driverIconEl        = useRef(null);
+    const driverIconEl        = useRef(null);    // rotatable element (van OR beam)
+    const driverPuckEl        = useRef(null);    // puck container
+    const driverVehicleEl     = useRef(null);    // vehicle container
     const routePopup          = useRef(null);
     const lastRerouteTime     = useRef(0);
     const initialRouteDrawn   = useRef(false);
-    const routeGeometryRef    = useRef(null);   // current route geometry (canonical from OSRM)
-    const lerpRef             = useRef(null);    // LerpAnimator instance
+    const routeGeometryRef    = useRef(null);
+    const lerpRef             = useRef(null);
+    const currentIconStateRef = useRef('vehicle'); // track current state for transitions
     const [mapReady, setMapReady] = useState(false);
 
     // ── Bootstrap map ─────────────────────────────────────────────
@@ -163,11 +171,13 @@ function DeliveryMapInner({
                 drawStaticRoute(map, pickup, dropoff);
             }
 
-            // ── Initial driver marker ──────────────────────────
+            // ── Initial driver marker ──────────────────────
             if (driverLocation?.lat && driverLocation?.lng) {
-                const { marker, iconEl } = createDriverMarker(map, driverLocation);
+                const { marker, iconEl, puckEl, vehicleEl } = createDriverMarker(map, driverLocation, driverIconState);
                 driverMarker.current = marker;
                 driverIconEl.current = iconEl;
+                driverPuckEl.current = puckEl;
+                driverVehicleEl.current = vehicleEl;
             }
 
             // ── Fit bounds to show all points ──────────────────
@@ -191,9 +201,31 @@ function DeliveryMapInner({
                 // Both icon position and route line are updated on the SAME
                 // rAF frame to prevent any single-frame desync.
 
-                // 1. Update driver icon bearing
-                if (driverIconEl.current && typeof bearing === 'number') {
-                    driverIconEl.current.style.transform = `rotate(${bearing}deg)`;
+                // 1. Update driver icon bearing based on current icon state
+                if (typeof bearing === 'number') {
+                    if (currentIconStateRef.current === 'puck') {
+                        // Puck: rotate the beam to match compass heading (no offset needed,
+                        // the beam's conic gradient already points "up" = forward)
+                        if (driverPuckEl.current) {
+                            const beamEl = driverPuckEl.current.querySelector('.puck-beam');
+                            if (beamEl) beamEl.style.transform = `rotate(${bearing}deg)`;
+                        }
+                    } else {
+                        // Vehicle: rotate the van emoji with offset
+                        if (driverIconEl.current) {
+                            const displayBearing = applyRotationOffset(bearing);
+                            driverIconEl.current.style.transform = `rotate(${displayBearing}deg)`;
+                        }
+                    }
+                }
+
+                // 1b. Update accuracy circle position
+                if (mapRef.current.getSource('accuracy-circle')) {
+                    mapRef.current.getSource('accuracy-circle').setData({
+                        type: 'Feature',
+                        geometry: { type: 'Point', coordinates: [lng, lat] },
+                        properties: {},
+                    });
                 }
 
                 // 2. Synchronize the route line's leading edge
@@ -289,13 +321,78 @@ function DeliveryMapInner({
     // ── Update bearing from pipeline ──
     useEffect(() => {
         if (lerpRef.current && typeof activeBearing === 'number') {
+            // Feed the raw geographic bearing to the lerp animator;
+            // the offset is applied in onFrameSync when setting CSS transform
             lerpRef.current.setBearing(activeBearing);
         }
-        // Also apply immediately to the icon element
-        if (driverIconEl.current && typeof activeBearing === 'number') {
-            driverIconEl.current.style.transform = `rotate(${activeBearing}deg)`;
-        }
     }, [activeBearing]);
+
+    // ── Icon state transitions (puck ↔ vehicle) ──────────────────
+    useEffect(() => {
+        if (!driverPuckEl.current || !driverVehicleEl.current) return;
+        if (driverIconState === currentIconStateRef.current) return;
+
+        currentIconStateRef.current = driverIconState;
+
+        if (driverIconState === 'puck') {
+            // Crossfade: vehicle → puck
+            driverVehicleEl.current.style.opacity = '0';
+            driverVehicleEl.current.style.pointerEvents = 'none';
+            driverPuckEl.current.style.opacity = '1';
+            driverPuckEl.current.style.pointerEvents = 'auto';
+        } else {
+            // Crossfade: puck → vehicle
+            driverPuckEl.current.style.opacity = '0';
+            driverPuckEl.current.style.pointerEvents = 'none';
+            driverVehicleEl.current.style.opacity = '1';
+            driverVehicleEl.current.style.pointerEvents = 'auto';
+        }
+    }, [driverIconState]);
+
+    // ── GPS Accuracy Circle Layer (MapLibre native) ──────────────
+    useEffect(() => {
+        if (!mapReady || !mapRef.current) return;
+        if (!driverLocation?.lat || !driverLocation?.lng) return;
+
+        const map = mapRef.current;
+        const geojson = {
+            type: 'Feature',
+            geometry: {
+                type: 'Point',
+                coordinates: [driverLocation.lng, driverLocation.lat],
+            },
+            properties: {},
+        };
+
+        // Create or update the accuracy source
+        if (!map.getSource('accuracy-circle')) {
+            map.addSource('accuracy-circle', { type: 'geojson', data: geojson });
+
+            // Circle layer that scales with zoom to represent meters on the map.
+            // circle-radius uses a zoom-interpolated expression so accuracy (in meters)
+            // maps correctly at each zoom level.
+            map.addLayer({
+                id: 'accuracy-circle',
+                type: 'circle',
+                source: 'accuracy-circle',
+                paint: {
+                    'circle-radius': accuracyToRadius(gpsAccuracy),
+                    'circle-color': 'rgba(66, 133, 244, 0.08)',
+                    'circle-stroke-color': 'rgba(66, 133, 244, 0.2)',
+                    'circle-stroke-width': 1,
+                },
+            }, getFirstSymbolLayerId(map)); // Insert below labels
+        } else {
+            map.getSource('accuracy-circle').setData(geojson);
+            map.setPaintProperty('accuracy-circle', 'circle-radius', accuracyToRadius(gpsAccuracy));
+        }
+
+        // Only show when in puck mode
+        const visibility = (driverIconState === 'puck' && gpsAccuracy > 0) ? 'visible' : 'none';
+        if (map.getLayer('accuracy-circle')) {
+            map.setLayoutProperty('accuracy-circle', 'visibility', visibility);
+        }
+    }, [driverLocation?.lat, driverLocation?.lng, gpsAccuracy, driverIconState, mapReady]);
 
     // ── Live reroute: driver → dropoff ────────────────────────────
     const doReroute = useCallback(async (driverLoc) => {
@@ -391,9 +488,11 @@ function DeliveryMapInner({
 
         // Ensure driver marker exists
         if (!driverMarker.current) {
-            const { marker, iconEl } = createDriverMarker(mapRef.current, driverLocation);
+            const { marker, iconEl, puckEl, vehicleEl } = createDriverMarker(mapRef.current, driverLocation, driverIconState);
             driverMarker.current = marker;
             driverIconEl.current = iconEl;
+            driverPuckEl.current = puckEl;
+            driverVehicleEl.current = vehicleEl;
             // First position — jump immediately, don't animate
             if (lerpRef.current) {
                 lerpRef.current.jumpTo(driverLocation);
@@ -460,8 +559,35 @@ function DeliveryMapInner({
                 .map-pin{display:flex;flex-direction:column;align-items:center;cursor:pointer}
                 .pin-circle{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,.35);font-size:17px}
                 .pin-tail{width:2px;height:10px;border-radius:1px;margin-top:-2px}
-                .driver-dot{display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;z-index:5}
-                .driver-icon-rotatable{font-size:26px;transition:transform 0.3s ease-out}
+
+                /* ── Driver icon container ── */
+                .driver-dot{display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;z-index:5;width:80px;height:80px}
+
+                /* ── Puck state (stationary compass) ── */
+                .driver-puck{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;transition:opacity 0.25s ease}
+                .puck-beam{
+                    position:absolute;width:80px;height:80px;border-radius:50%;
+                    background:conic-gradient(
+                        from -30deg,
+                        transparent 0deg,
+                        rgba(66,133,244,0.30) 15deg,
+                        rgba(66,133,244,0.12) 30deg,
+                        rgba(66,133,244,0.04) 50deg,
+                        transparent 60deg
+                    );
+                    transition:transform 0.1s linear
+                }
+                .puck-dot{
+                    position:relative;z-index:2;
+                    width:18px;height:18px;border-radius:50%;
+                    background:#4285F4;
+                    border:3px solid white;
+                    box-shadow:0 2px 8px rgba(0,0,0,.3)
+                }
+
+                /* ── Vehicle state (moving van) ── */
+                .driver-vehicle{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;transition:opacity 0.25s ease}
+                .driver-icon-rotatable{font-size:26px;transition:transform 0.15s linear}
                 .driver-ring{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(66,133,244,.2);animation:dring 1.5s ease-in-out infinite}
                 @keyframes dring{0%{transform:translate(-50%,-50%) scale(1);opacity:.7}100%{transform:translate(-50%,-50%) scale(2.4);opacity:0}}
 
@@ -506,6 +632,8 @@ const DeliveryMap = memo(DeliveryMapInner, (prevProps, nextProps) => {
         prevProps.activeBearing === nextProps.activeBearing &&
         prevProps.snapMode === nextProps.snapMode &&
         prevProps.routeGeometry === nextProps.routeGeometry &&
+        prevProps.driverIconState === nextProps.driverIconState &&
+        prevProps.gpsAccuracy === nextProps.gpsAccuracy &&
         prevProps.className === nextProps.className
     );
 });
@@ -666,24 +794,97 @@ function popupHtml(html) {
 }
 
 /**
- * Create the driver marker with a rotatable icon element.
- * Returns both the Marker and the rotatable icon DOM element.
+ * Create the driver marker with dual-state DOM structure.
+ *
+ * Structure:
+ *  .driver-dot (container)
+ *  ├─ .driver-puck (shown when stationary)
+ *  │   ├─ .puck-beam (conic gradient, rotated by heading)
+ *  │   └─ .puck-dot (solid blue circle)
+ *  └─ .driver-vehicle (shown when moving)
+ *      ├─ .driver-ring (pulsing blue ring)
+ *      └─ .driver-icon-rotatable (🚐 emoji)
+ *
+ * Returns: { marker, iconEl, puckEl, vehicleEl }
  */
-function createDriverMarker(map, loc) {
+function createDriverMarker(map, loc, initialState = 'vehicle') {
     const el = document.createElement('div');
     el.className = 'driver-dot';
+
+    // ── Puck state ──
+    const puckEl = document.createElement('div');
+    puckEl.className = 'driver-puck';
+    puckEl.style.opacity = initialState === 'puck' ? '1' : '0';
+    puckEl.style.pointerEvents = initialState === 'puck' ? 'auto' : 'none';
+    puckEl.innerHTML = `
+        <div class="puck-beam"></div>
+        <div class="puck-dot"></div>
+    `;
+
+    // ── Vehicle state ──
+    const vehicleEl = document.createElement('div');
+    vehicleEl.className = 'driver-vehicle';
+    vehicleEl.style.opacity = initialState === 'vehicle' ? '1' : '0';
+    vehicleEl.style.pointerEvents = initialState === 'vehicle' ? 'auto' : 'none';
 
     const iconEl = document.createElement('span');
     iconEl.className = 'driver-icon-rotatable';
     iconEl.textContent = '🚐';
 
-    el.innerHTML = `<div class="driver-ring"></div>`;
-    el.appendChild(iconEl);
+    vehicleEl.innerHTML = `<div class="driver-ring"></div>`;
+    vehicleEl.appendChild(iconEl);
+
+    // Assemble
+    el.appendChild(puckEl);
+    el.appendChild(vehicleEl);
 
     const marker = new maplibregl.Marker({ element: el })
         .setLngLat([loc.lng, loc.lat])
         .setPopup(popupHtml('<strong>🚐 Driver</strong><br/><small>Live Location</small>'))
         .addTo(map);
 
-    return { marker, iconEl };
+    return { marker, iconEl, puckEl, vehicleEl };
+}
+
+/**
+ * Convert GPS accuracy (meters) into a MapLibre circle-radius zoom expression.
+ * Uses the Mercator projection formula to translate meters → pixels at each zoom.
+ *
+ * At zoom z, 1 meter ≈ (256 / (2π * 6378137)) * 2^z pixels
+ *
+ * @param {number|null} accuracyMeters
+ * @returns {object} — MapLibre style expression for circle-radius
+ */
+function accuracyToRadius(accuracyMeters) {
+    if (!accuracyMeters || accuracyMeters <= 0) {
+        return 0; // hide
+    }
+
+    // MapLibre expression: meters_to_pixels * accuracy
+    // meters_to_pixels_at_equator = 256 / (2 * PI * 6378137) = ~6.388e-6
+    // At zoom z, pixels = accuracy * 6.388e-6 * 2^z
+    //
+    // We use an interpolation expression for readability and to cap max size:
+    return [
+        'interpolate', ['exponential', 2], ['zoom'],
+        0,  accuracyMeters * 0.0000064,  // ~0px at z0
+        10, accuracyMeters * 0.0065,     // small circle
+        15, accuracyMeters * 0.21,       // visible ring
+        20, accuracyMeters * 6.7,        // large at street level
+    ];
+}
+
+/**
+ * Find the first symbol layer id in the map style.
+ * Used to insert the accuracy circle layer below labels.
+ *
+ * @param {maplibregl.Map} map
+ * @returns {string|undefined}
+ */
+function getFirstSymbolLayerId(map) {
+    const layers = map.getStyle().layers;
+    for (const layer of layers) {
+        if (layer.type === 'symbol') return layer.id;
+    }
+    return undefined;
 }

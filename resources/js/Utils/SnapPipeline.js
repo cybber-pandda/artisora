@@ -35,6 +35,7 @@ const SNAP_DISTANCE_THRESHOLD = 20;
  * @property {[number, number][]}      accumulatedOffroad — accumulated off-road positions
  * @property {[number, number][]}      recentRawPositions — last few raw GPS positions (for bearing fallback)
  * @property {[number, number][]|null} originalRouteCoords — the canonical route (without any tail)
+ * @property {number}                  lastKnownBearing   — previous bearing (for offroad fallback)
  */
 
 /**
@@ -65,6 +66,7 @@ export function processGpsTick(input) {
         accumulatedOffroad,
         recentRawPositions,
         originalRouteCoords,
+        lastKnownBearing = 0,
     } = input;
 
     // ═══════════════════════════════════════════════════════════════
@@ -89,7 +91,7 @@ export function processGpsTick(input) {
         return {
             snapMode: 'offroad',
             targetPosition: rawPosition,
-            bearing: resolveOffroadBearing(coords.heading, updatedRecentRaw),
+            bearing: resolveOffroadBearing(coords.heading, updatedRecentRaw, lastKnownBearing),
             routeGeometry: originalRouteCoords || [],
             lastSnappedPoint: lastSnappedPoint,
             accumulatedOffroad: [...(accumulatedOffroad || []), rawPosition],
@@ -148,7 +150,7 @@ export function processGpsTick(input) {
         // ── OFF-ROAD MODE ─────────────────────────────────────────
 
         // Step 4b — Bearing: heading from Geolocation API or last-two-points
-        const bearingDeg = resolveOffroadBearing(coords.heading, updatedRecentRaw);
+        const bearingDeg = resolveOffroadBearing(coords.heading, updatedRecentRaw, lastKnownBearing);
 
         // Step 5 — Dynamic Route Tail
         const updatedOffroad = [...(accumulatedOffroad || []), rawPosition];

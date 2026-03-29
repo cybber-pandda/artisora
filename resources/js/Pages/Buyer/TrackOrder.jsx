@@ -171,6 +171,7 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
                         dropoff={dropoff}
                         driverLocation={driverLocation}
                         status={delivery.status}
+                        driverIconState="vehicle"
                         pickupLabel="🎨 Artist"
                         dropoffLabel={`📦 ${order.buyer_name}`}
                         className="h-80"
