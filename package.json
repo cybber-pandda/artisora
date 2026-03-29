@@ -23,6 +23,10 @@
         "vite": "^7.0.7"
     },
     "dependencies": {
+        "@turf/bearing": "^7.3.4",
+        "@turf/distance": "^7.3.4",
+        "@turf/helpers": "^7.3.4",
+        "@turf/nearest-point-on-line": "^7.3.4",
         "framer-motion": "^12.38.0",
         "lucide-react": "^0.577.0",
         "maplibre-gl": "^5.21.1"

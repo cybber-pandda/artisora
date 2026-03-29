@@ -7,11 +7,9 @@ const KEY       = import.meta.env.VITE_MAPTILER_API_KEY;
 const MAP_STYLE = `https://api.maptiler.com/maps/streets-v2/style.json?key=${KEY}`;
 
 // ── Routing providers (OSRM is free + follows real roads) ─────────
-// Primary: OSRM public API (free, no key needed, real road routing)
 const OSRM_ROUTE_URL = (from, to) =>
     `https://router.project-osrm.org/route/v1/driving/${from[0]},${from[1]};${to[0]},${to[1]}?overview=full&geometries=geojson&steps=true&alternatives=true`;
 
-// Fallback: MapTiler (needs paid plan for directions)
 const MAPTILER_ROUTE_URL = (from, to) =>
     `https://api.maptiler.com/directions/v1/driving/${from[0]},${from[1]};${to[0]},${to[1]}?key=${KEY}&geometries=geojson&overview=full`;
 
@@ -27,7 +25,7 @@ const REROUTE_THROTTLE_MS = 15_000;
  *
  * Returns: { geometry, durationSec, distanceMeters } or null
  */
-async function fetchDrivingRoute(from, to) {
+export async function fetchDrivingRoute(from, to) {
     // ── Try OSRM first (free, follows roads perfectly) ────────────
     try {
         const url = OSRM_ROUTE_URL([from.lng, from.lat], [to.lng, to.lat]);
@@ -72,39 +70,45 @@ async function fetchDrivingRoute(from, to) {
 }
 
 /**
- * DeliveryMap — reusable MapLibre GL map with LIVE road-following rerouting.
- *
- * Uses OSRM (free) for real road routing — just like Waze / Google Maps.
- * Features Kalman-filtered positions, lerp animation, and synchronized
- * route line updates.
+ * DeliveryMap — reusable MapLibre GL map with LIVE road-following rerouting
+ * and hybrid GPS snapping support.
  *
  * Props:
- *  pickup:         { lat, lng }  — pickup point (green pin)
- *  dropoff:        { lat, lng }  — dropoff / buyer point (red pin)
- *  driverLocation: { lat, lng }  — live driver position (blue pulse)
- *  status:         string        — delivery status ('picked_up','in_transit','delivered')
- *  pickupLabel:    string
- *  dropoffLabel:   string
- *  className:      string
- *  onRouteInfo:    (info) => void — callback with { durationMin, distanceKm }
+ *  pickup:           { lat, lng }  — pickup point (green pin)
+ *  dropoff:          { lat, lng }  — dropoff / buyer point (red pin)
+ *  driverLocation:   { lat, lng }  — live driver position
+ *  status:           string        — delivery status
+ *  activeBearing:    number        — bearing for driver icon rotation (degrees)
+ *  snapMode:         'snapped' | 'offroad' — current snap mode
+ *  routeGeometry:    [number,number][]|null — route coords from pipeline (including tail)
+ *  pickupLabel:      string
+ *  dropoffLabel:     string
+ *  className:        string
+ *  onRouteInfo:      (info) => void
+ *  onRouteReady:     (routeCoords) => void — callback with canonical route coords for parent pipeline
  */
 function DeliveryMapInner({
     pickup,
     dropoff,
     driverLocation,
     status = '',
+    activeBearing = 0,
+    snapMode = null,
+    routeGeometry = null,
     pickupLabel  = '🎨 Pickup',
     dropoffLabel = '📦 Buyer',
     className = '',
     onRouteInfo,
+    onRouteReady,
 }) {
     const containerRef        = useRef(null);
     const mapRef              = useRef(null);
     const driverMarker        = useRef(null);
+    const driverIconEl        = useRef(null);
     const routePopup          = useRef(null);
     const lastRerouteTime     = useRef(0);
     const initialRouteDrawn   = useRef(false);
-    const routeGeometryRef    = useRef(null);   // current OSRM route geometry
+    const routeGeometryRef    = useRef(null);   // current route geometry (canonical from OSRM)
     const lerpRef             = useRef(null);    // LerpAnimator instance
     const [mapReady, setMapReady] = useState(false);
 
@@ -161,30 +165,51 @@ function DeliveryMapInner({
 
             // ── Initial driver marker ──────────────────────────
             if (driverLocation?.lat && driverLocation?.lng) {
-                driverMarker.current = createDriverMarker(map, driverLocation);
+                const { marker, iconEl } = createDriverMarker(map, driverLocation);
+                driverMarker.current = marker;
+                driverIconEl.current = iconEl;
             }
 
             // ── Fit bounds to show all points ──────────────────
             fitAllPoints(map, pickup, dropoff, driverLocation);
         });
 
-        // ── Create lerp animator ──────────────────────────────
+        // ── Create lerp animator with synchronized frame callback ──
         lerpRef.current = new LerpAnimator({
-            duration: 2500, // 2.5s ease-out as requested
+            duration: 2500, // 2.5s ease-out
             onFrame: ({ lat, lng }) => {
                 if (!mapRef.current) return;
-
                 // Slide the driver marker smoothly
                 if (driverMarker.current) {
                     driverMarker.current.setLngLat([lng, lat]);
                 }
+            },
+            onFrameSync: ({ lat, lng, bearing, routeGeometry: routeGeo }) => {
+                if (!mapRef.current) return;
 
-                // ── Synchronize the route line's leading edge ──
-                // Splice the current interpolated position onto the
-                // front of the route geometry so the line "follows" the icon.
-                if (routeGeometryRef.current && mapRef.current.getSource('active-route')) {
+                // ── Synchronized frame contract ──
+                // Both icon position and route line are updated on the SAME
+                // rAF frame to prevent any single-frame desync.
+
+                // 1. Update driver icon bearing
+                if (driverIconEl.current && typeof bearing === 'number') {
+                    driverIconEl.current.style.transform = `rotate(${bearing}deg)`;
+                }
+
+                // 2. Synchronize the route line's leading edge
+                if (routeGeo && routeGeo.length > 0 && mapRef.current.getSource('active-route')) {
+                    // Replace the first coordinate with the lerped position
+                    const updatedCoords = [[lng, lat], ...routeGeo.slice(1)];
+                    mapRef.current.getSource('active-route').setData({
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: updatedCoords,
+                        },
+                    });
+                } else if (routeGeometryRef.current && mapRef.current.getSource('active-route')) {
+                    // Fallback: use the stored route geometry
                     const coords = routeGeometryRef.current.coordinates;
-                    // Replace the first coordinate with the interpolated position
                     const updatedCoords = [[lng, lat], ...coords.slice(1)];
                     mapRef.current.getSource('active-route').setData({
                         type: 'Feature',
@@ -196,7 +221,6 @@ function DeliveryMapInner({
                 }
             },
             onComplete: ({ lat, lng }) => {
-                // Pan to keep driver visible at animation end (less jarring)
                 if (mapRef.current) {
                     mapRef.current.easeTo({
                         center: [lng, lat],
@@ -224,12 +248,10 @@ function DeliveryMapInner({
     async function drawStaticRoute(map, from, to) {
         const routeData = await fetchDrivingRoute(from, to);
         if (!routeData) {
-            // absolute last resort: straight line
             addStraightLine(map, from, to, 'overview-route');
             return;
         }
 
-        // Draw the full route overview (gray, dashed — "planned route")
         addRouteToMap(map, 'overview-route', routeData.geometry, {
             color: '#94a3b8',
             width: 3,
@@ -237,8 +259,43 @@ function DeliveryMapInner({
             dash: [6, 4],
         });
 
+        // Store the canonical route geometry and notify parent
+        routeGeometryRef.current = routeData.geometry;
+        if (onRouteReady && routeData.geometry?.coordinates) {
+            onRouteReady(routeData.geometry.coordinates);
+        }
+
         initialRouteDrawn.current = true;
     }
+
+    // ── Update route geometry from pipeline (offroad tail / pruned) ──
+    useEffect(() => {
+        if (!mapReady || !mapRef.current) return;
+        if (!routeGeometry || routeGeometry.length < 2) return;
+
+        // Feed the pipeline's route geometry into the lerp animator
+        // so the sync callback updates the leading edge on every frame
+        if (lerpRef.current) {
+            lerpRef.current.setRouteGeometry(routeGeometry);
+        }
+
+        // Also update the map source directly for immediate visual feedback
+        updateOrCreateRouteSource(mapRef.current, 'active-route', {
+            type: 'LineString',
+            coordinates: routeGeometry,
+        });
+    }, [routeGeometry, mapReady]);
+
+    // ── Update bearing from pipeline ──
+    useEffect(() => {
+        if (lerpRef.current && typeof activeBearing === 'number') {
+            lerpRef.current.setBearing(activeBearing);
+        }
+        // Also apply immediately to the icon element
+        if (driverIconEl.current && typeof activeBearing === 'number') {
+            driverIconEl.current.style.transform = `rotate(${activeBearing}deg)`;
+        }
+    }, [activeBearing]);
 
     // ── Live reroute: driver → dropoff ────────────────────────────
     const doReroute = useCallback(async (driverLoc) => {
@@ -246,7 +303,6 @@ function DeliveryMapInner({
         if (!map || !dropoff?.lat || !dropoff?.lng) return;
         if (!driverLoc?.lat || !driverLoc?.lng) return;
 
-        // Only reroute during active delivery
         const activeStatuses = ['picked_up', 'in_transit'];
         if (!activeStatuses.includes(status)) return;
 
@@ -259,7 +315,6 @@ function DeliveryMapInner({
         const routeData = await fetchDrivingRoute(driverLoc, dropoff);
 
         if (!routeData) {
-            // If all routing APIs fail, update the source in-place with a straight line
             const straightGeom = {
                 type: 'LineString',
                 coordinates: [
@@ -275,6 +330,11 @@ function DeliveryMapInner({
         // ── Update route geometry (in-place setData, no teardown) ──
         routeGeometryRef.current = routeData.geometry;
         updateOrCreateRouteSource(map, 'active-route', routeData.geometry);
+
+        // Notify parent with the new canonical route coords
+        if (onRouteReady && routeData.geometry?.coordinates) {
+            onRouteReady(routeData.geometry.coordinates);
+        }
 
         // ── Draw COMPLETED segment (pickup → driver) ─────────
         if (pickup?.lat && pickup?.lng) {
@@ -294,7 +354,6 @@ function DeliveryMapInner({
         const durationMin = Math.round(routeData.durationSec / 60);
         const distanceKm  = (routeData.distanceMeters / 1000).toFixed(1);
 
-        // Callback for parent components (TrackOrder / ActiveDelivery)
         if (onRouteInfo) {
             onRouteInfo({ durationMin, distanceKm });
         }
@@ -323,7 +382,7 @@ function DeliveryMapInner({
             .addTo(map);
         }
 
-    }, [dropoff, pickup, status, onRouteInfo]);
+    }, [dropoff, pickup, status, onRouteInfo, onRouteReady]);
 
     // ── Move driver marker (LERP) + trigger reroute ───────────────
     useEffect(() => {
@@ -332,7 +391,9 @@ function DeliveryMapInner({
 
         // Ensure driver marker exists
         if (!driverMarker.current) {
-            driverMarker.current = createDriverMarker(mapRef.current, driverLocation);
+            const { marker, iconEl } = createDriverMarker(mapRef.current, driverLocation);
+            driverMarker.current = marker;
+            driverIconEl.current = iconEl;
             // First position — jump immediately, don't animate
             if (lerpRef.current) {
                 lerpRef.current.jumpTo(driverLocation);
@@ -342,7 +403,6 @@ function DeliveryMapInner({
             if (lerpRef.current) {
                 lerpRef.current.animateTo(driverLocation);
             } else {
-                // Fallback if lerp somehow not initialized
                 driverMarker.current.setLngLat([driverLocation.lng, driverLocation.lat]);
             }
         }
@@ -400,7 +460,8 @@ function DeliveryMapInner({
                 .map-pin{display:flex;flex-direction:column;align-items:center;cursor:pointer}
                 .pin-circle{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;border:3px solid white;box-shadow:0 3px 12px rgba(0,0,0,.35);font-size:17px}
                 .pin-tail{width:2px;height:10px;border-radius:1px;margin-top:-2px}
-                .driver-dot{display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;font-size:26px;z-index:5}
+                .driver-dot{display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;z-index:5}
+                .driver-icon-rotatable{font-size:26px;transition:transform 0.3s ease-out}
                 .driver-ring{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(66,133,244,.2);animation:dring 1.5s ease-in-out infinite}
                 @keyframes dring{0%{transform:translate(-50%,-50%) scale(1);opacity:.7}100%{transform:translate(-50%,-50%) scale(2.4);opacity:0}}
 
@@ -432,10 +493,8 @@ function DeliveryMapInner({
 
 // ═══════════════════════════════════════════════════════════════════
 //  REACT.MEMO — avoid re-renders when parent state changes
-//  Only re-render when location, status, or route endpoints change
 // ═══════════════════════════════════════════════════════════════════
 const DeliveryMap = memo(DeliveryMapInner, (prevProps, nextProps) => {
-    // Return true = skip re-render. Return false = re-render.
     return (
         prevProps.driverLocation?.lat === nextProps.driverLocation?.lat &&
         prevProps.driverLocation?.lng === nextProps.driverLocation?.lng &&
@@ -444,6 +503,9 @@ const DeliveryMap = memo(DeliveryMapInner, (prevProps, nextProps) => {
         prevProps.pickup?.lng === nextProps.pickup?.lng &&
         prevProps.dropoff?.lat === nextProps.dropoff?.lat &&
         prevProps.dropoff?.lng === nextProps.dropoff?.lng &&
+        prevProps.activeBearing === nextProps.activeBearing &&
+        prevProps.snapMode === nextProps.snapMode &&
+        prevProps.routeGeometry === nextProps.routeGeometry &&
         prevProps.className === nextProps.className
     );
 });
@@ -461,45 +523,32 @@ function removeSourceSafe(map, id) {
     try { if (map.getSource(id)) map.removeSource(id); } catch {}
 }
 
-/**
- * Update an existing GeoJSON source in-place via setData(),
- * or create it with full styling if it doesn't exist yet.
- *
- * This avoids the flash caused by remove → re-add cycle.
- */
 function updateOrCreateRouteSource(map, sourceId, geometry, style) {
     const geojson = { type: 'Feature', geometry };
     const existing = map.getSource(sourceId);
 
     if (existing) {
-        // ── In-place update — no layer teardown, no flash ──
         existing.setData(geojson);
         return;
     }
 
-    // ── First time: create source + layers ──
     if (sourceId === 'active-route') {
         map.addSource('active-route', { type: 'geojson', data: geojson });
-
-        // Glow (outermost)
         map.addLayer({
             id: 'active-route-glow', type: 'line', source: 'active-route',
             paint: { 'line-color': '#3b82f6', 'line-width': 14, 'line-opacity': 0.06, 'line-blur': 6 },
             layout: { 'line-cap': 'round', 'line-join': 'round' },
         });
-        // Shadow
         map.addLayer({
             id: 'active-route-shadow', type: 'line', source: 'active-route',
             paint: { 'line-color': '#1e40af', 'line-width': 8, 'line-opacity': 0.18 },
             layout: { 'line-cap': 'round', 'line-join': 'round' },
         });
-        // Main line (vivid blue)
         map.addLayer({
             id: 'active-route', type: 'line', source: 'active-route',
             paint: { 'line-color': '#4285F4', 'line-width': 5, 'line-opacity': 0.95 },
             layout: { 'line-cap': 'round', 'line-join': 'round' },
         });
-        // White dash overlay
         map.addLayer({
             id: 'active-route-dash', type: 'line', source: 'active-route',
             paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 0.45, 'line-dasharray': [0, 2, 2] },
@@ -517,7 +566,6 @@ function updateOrCreateRouteSource(map, sourceId, geometry, style) {
             layout: { 'line-cap': 'round', 'line-join': 'round' },
         });
     } else {
-        // Generic route source
         map.addSource(sourceId, { type: 'geojson', data: geojson });
         map.addLayer({
             id: sourceId, type: 'line', source: sourceId,
@@ -531,7 +579,6 @@ function updateOrCreateRouteSource(map, sourceId, geometry, style) {
     }
 }
 
-/** Add a route geometry to the map with styling */
 function addRouteToMap(map, sourceId, geometry, { color, width, opacity, dash }) {
     removeLayerSafe(map, sourceId);
     removeSourceSafe(map, sourceId);
@@ -555,7 +602,6 @@ function addRouteToMap(map, sourceId, geometry, { color, width, opacity, dash })
     });
 }
 
-/** Last resort: straight line when ALL routing APIs fail */
 function addStraightLine(map, from, to, sourceId) {
     removeLayerSafe(map, sourceId);
     removeSourceSafe(map, sourceId);
@@ -587,7 +633,6 @@ function addStraightLine(map, from, to, sourceId) {
     });
 }
 
-/** Fit the map bounds to include all provided points */
 function fitAllPoints(map, pickup, dropoff, driver) {
     const points = [];
     if (pickup?.lat  && pickup?.lng)  points.push([pickup.lng, pickup.lat]);
@@ -620,13 +665,25 @@ function popupHtml(html) {
     return new maplibregl.Popup({ offset: 32 }).setHTML(html);
 }
 
+/**
+ * Create the driver marker with a rotatable icon element.
+ * Returns both the Marker and the rotatable icon DOM element.
+ */
 function createDriverMarker(map, loc) {
     const el = document.createElement('div');
     el.className = 'driver-dot';
-    el.innerHTML = `<div class="driver-ring"></div><span>🚐</span>`;
 
-    return new maplibregl.Marker({ element: el })
+    const iconEl = document.createElement('span');
+    iconEl.className = 'driver-icon-rotatable';
+    iconEl.textContent = '🚐';
+
+    el.innerHTML = `<div class="driver-ring"></div>`;
+    el.appendChild(iconEl);
+
+    const marker = new maplibregl.Marker({ element: el })
         .setLngLat([loc.lng, loc.lat])
         .setPopup(popupHtml('<strong>🚐 Driver</strong><br/><small>Live Location</small>'))
         .addTo(map);
+
+    return { marker, iconEl };
 }

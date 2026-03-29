@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import AppLayout from '@/Layouts/AppLayout';
 import { Head } from '@inertiajs/react';
 import { motion } from 'framer-motion';
@@ -8,7 +8,6 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
-import { GpsFilter } from '@/Utils/KalmanFilter';
 
 const STATUS_STEPS = [
     { key: 'pending_driver', label: 'Driver Assigned' },
@@ -67,42 +66,18 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
     const [polling, setPolling] = useState(true);
     const [routeInfo, setRouteInfo] = useState(null);
 
-    // ── Buyer-side Kalman filter for polled driver coordinates ─────
-    const gpsFilterRef = useRef(new GpsFilter());
-
     // ── Poll driver location every 10 seconds ────────────────────
+    // The driver-side pipeline handles all snapping/filtering.
+    // Server returns already-processed coordinates.
     const poll = useCallback(async () => {
         if (!polling || delivery.status === 'delivered') return;
         try {
             const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
 
-            // The server already stores Kalman-filtered coords (driver_lat/lng),
-            // but apply buyer-side filtering too for extra smoothness on the poll.
-            let driverLat = data.driver_lat;
-            let driverLng = data.driver_lng;
-
-            if (driverLat && driverLng) {
-                const filtered = gpsFilterRef.current.filter(driverLat, driverLng);
-                // Only update coordinates if movement detected
-                if (!filtered.didMove) {
-                    // Still update non-GPS fields (status, eta)
-                    setDelivery(prev => ({
-                        ...prev,
-                        status:               data.status,
-                        estimated_arrival_at: data.estimated_arrival_at,
-                        adjusted_eta:         data.adjusted_eta,
-                    }));
-                    setLastUpdated(new Date());
-                    return;
-                }
-                driverLat = filtered.lat;
-                driverLng = filtered.lng;
-            }
-
             setDelivery(prev => ({
                 ...prev,
-                driver_lat:           driverLat,
-                driver_lng:           driverLng,
+                driver_lat:           data.driver_lat,
+                driver_lng:           data.driver_lng,
                 status:               data.status,
                 estimated_arrival_at: data.estimated_arrival_at,
                 adjusted_eta:         data.adjusted_eta,

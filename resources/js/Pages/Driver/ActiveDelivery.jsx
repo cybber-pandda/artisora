@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
+import { processGpsTick } from '@/Utils/SnapPipeline';
 
 // ── Status config ─────────────────────────────────────────────────
 const STATUS_CONFIG = {
@@ -59,32 +60,88 @@ function StepBar({ status }) {
     );
 }
 
-// ── GPS Sharing Hook (with Kalman filtering) ─────────────────────
-import { GpsFilter } from '@/Utils/KalmanFilter';
+// ═══════════════════════════════════════════════════════════════════
+//  useLocationService — hybrid GPS snapping + location sharing hook
+// ═══════════════════════════════════════════════════════════════════
+// Replaces the old useGpsSharing hook. Uses watchPosition for
+// continuous GPS ticks and feeds them through the SnapPipeline.
 
-function useGpsSharing(deliveryId, shouldAutoStart) {
+/** Server send throttle — max one location push per 10 seconds */
+const SERVER_SEND_INTERVAL_MS = 10_000;
+
+function useLocationService(deliveryId, shouldAutoStart) {
     const [sharing, setSharing]   = useState(false);
     const [error, setError]       = useState(null);
     const [location, setLocation] = useState(null);
-    const intervalRef = useRef(null);
-    const gpsFilterRef = useRef(new GpsFilter());
 
-    const sendLocation = useCallback((rawLat, rawLng) => {
-        // ── Run raw GPS through the Kalman filter ──
-        const { lat, lng, didMove } = gpsFilterRef.current.filter(rawLat, rawLng);
+    // Pipeline state
+    const [snapMode, setSnapMode]               = useState('snapped');
+    const [activeBearing, setActiveBearing]     = useState(0);
+    const [pipelineRouteGeo, setPipelineRouteGeo] = useState(null);
 
-        // Always send to server (both filtered + raw for audit)
-        axios.post(route('driver.location', deliveryId), {
-            lat,           // filtered (smoothed) coordinates
-            lng,
-            raw_lat: rawLat, // original GPS reading for DB audit
-            raw_lng: rawLng,
-        }).catch(() => {});
+    // Refs for mutable state that shouldn't trigger re-renders
+    const watchIdRef           = useRef(null);
+    const lastServerSendRef    = useRef(0);
+    const lastSnappedPointRef  = useRef(null);
+    const accumulatedOffroadRef = useRef([]);
+    const recentRawPositionsRef = useRef([]);
+    const routeCoordsRef       = useRef(null);   // canonical route coords from DeliveryMap
+    const originalRouteCoordsRef = useRef(null); // untouched original route
+    const prevSnapModeRef      = useRef('snapped');
 
-        // Only update React state if there was meaningful movement.
-        // This prevents unnecessary re-renders (and map updates) from jitter.
-        if (didMove) {
-            setLocation({ lat, lng });
+    /**
+     * Called by DeliveryMap via onRouteReady — stores the canonical route
+     * LineString coordinates so the pipeline can snap against them.
+     */
+    const handleRouteReady = useCallback((coords) => {
+        routeCoordsRef.current = coords;
+        originalRouteCoordsRef.current = coords;
+    }, []);
+
+    /**
+     * Process a single GPS position through the snap pipeline.
+     */
+    const processPosition = useCallback((position) => {
+        const result = processGpsTick({
+            coords: position.coords,
+            routeCoords:        routeCoordsRef.current,
+            prevSnapMode:       prevSnapModeRef.current,
+            lastSnappedPoint:   lastSnappedPointRef.current,
+            accumulatedOffroad: accumulatedOffroadRef.current,
+            recentRawPositions: recentRawPositionsRef.current,
+            originalRouteCoords: originalRouteCoordsRef.current,
+        });
+
+        // null = fix was dropped by accuracy guard
+        if (!result) return;
+
+        // ── Update pipeline refs ──
+        lastSnappedPointRef.current   = result.lastSnappedPoint;
+        accumulatedOffroadRef.current = result.accumulatedOffroad;
+        recentRawPositionsRef.current = result.recentRawPositions;
+        prevSnapModeRef.current       = result.snapMode;
+
+        // ── Update React state (triggers DeliveryMap re-render) ──
+        const targetLng = result.targetPosition[0];
+        const targetLat = result.targetPosition[1];
+
+        setLocation({ lat: targetLat, lng: targetLng });
+        setSnapMode(result.snapMode);
+        setActiveBearing(result.bearing);
+        setPipelineRouteGeo(result.routeGeometry);
+
+        // ── Throttled server send ──
+        const now = Date.now();
+        if (now - lastServerSendRef.current >= SERVER_SEND_INTERVAL_MS) {
+            lastServerSendRef.current = now;
+            axios.post(route('driver.location', deliveryId), {
+                lat:     targetLat,           // pipeline-processed (snapped or raw)
+                lng:     targetLng,
+                raw_lat: result.rawPosition[1], // original GPS for audit trail
+                raw_lng: result.rawPosition[0],
+                snap_mode: result.snapMode,
+                bearing:   result.bearing,
+            }).catch(() => {});
         }
     }, [deliveryId]);
 
@@ -96,26 +153,29 @@ function useGpsSharing(deliveryId, shouldAutoStart) {
         setSharing(true);
         setError(null);
 
-        // Reset the Kalman filter for a fresh delivery session
-        gpsFilterRef.current.reset();
+        // Reset pipeline state for fresh session
+        lastSnappedPointRef.current   = null;
+        accumulatedOffroadRef.current = [];
+        recentRawPositionsRef.current = [];
+        prevSnapModeRef.current       = 'snapped';
 
-        const send = () => {
-            navigator.geolocation.getCurrentPosition(
-                pos => sendLocation(pos.coords.latitude, pos.coords.longitude),
-                () => setError('Could not get GPS fix. Please enable location services.'),
-                { enableHighAccuracy: true, timeout: 10000 }
-            );
-        };
-
-        send(); // immediate first hit
-        intervalRef.current = setInterval(send, 10000); // then every 10s
-    }, [sendLocation]);
+        // Use watchPosition for continuous GPS ticks
+        watchIdRef.current = navigator.geolocation.watchPosition(
+            (position) => processPosition(position),
+            () => setError('Could not get GPS fix. Please enable location services.'),
+            {
+                enableHighAccuracy: true,
+                timeout: 15000,
+                maximumAge: 0,
+            }
+        );
+    }, [processPosition]);
 
     const stop = useCallback(() => {
         setSharing(false);
-        if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
+        if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+            watchIdRef.current = null;
         }
     }, []);
 
@@ -125,15 +185,19 @@ function useGpsSharing(deliveryId, shouldAutoStart) {
             start();
         }
         return () => {
-            if (intervalRef.current) {
-                clearInterval(intervalRef.current);
-                intervalRef.current = null;
+            if (watchIdRef.current !== null) {
+                navigator.geolocation.clearWatch(watchIdRef.current);
+                watchIdRef.current = null;
             }
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [shouldAutoStart]);
 
-    return { sharing, start, stop, error, location };
+    return {
+        sharing, start, stop, error, location,
+        snapMode, activeBearing, pipelineRouteGeo,
+        handleRouteReady,
+    };
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -150,9 +214,8 @@ export default function ActiveDelivery({ delivery, order, artist }) {
     const isDelivered = delivery.status === 'delivered';
     const isActive    = isPickedUp || isInTransit;
 
-    // GPS auto-starts for both picked_up and in_transit — driver's location
-    // is always useful for the buyer to see
-    const gps = useGpsSharing(delivery.id, isActive);
+    // GPS with hybrid snapping pipeline
+    const gps = useLocationService(delivery.id, isActive);
 
     const status     = STATUS_CONFIG[delivery.status] ?? STATUS_CONFIG.picked_up;
     const StatusIcon = status.icon;
@@ -164,14 +227,13 @@ export default function ActiveDelivery({ delivery, order, artist }) {
             ? { lat: artist.lat, lng: artist.lng }
             : null;
 
-    // Dropoff: delivery coords → fallback to order coords (buyer's pinned address)
     const dropoff = (delivery.dropoff_lat && delivery.dropoff_lng)
         ? { lat: delivery.dropoff_lat, lng: delivery.dropoff_lng }
         : (order.delivery_lat && order.delivery_lng)
             ? { lat: order.delivery_lat, lng: order.delivery_lng }
             : null;
 
-    // Live driver location from GPS sharing or from server data
+    // Live driver location from pipeline or from server data
     const driverLocation = gps.location
         ?? (delivery.driver_lat && delivery.driver_lng
             ? { lat: delivery.driver_lat, lng: delivery.driver_lng }
@@ -263,10 +325,14 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                         dropoff={dropoff}
                         driverLocation={driverLocation}
                         status={delivery.status}
+                        activeBearing={gps.activeBearing}
+                        snapMode={gps.snapMode}
+                        routeGeometry={gps.pipelineRouteGeo}
                         pickupLabel={`🎨 ${artist?.name ?? 'Artist'}`}
                         dropoffLabel={`📦 ${order.buyer_name}`}
                         className="h-80"
                         onRouteInfo={setRouteInfo}
+                        onRouteReady={gps.handleRouteReady}
                     />
                 </div>
 
@@ -310,7 +376,7 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                             </p>
                             <p className="text-xs text-ink-muted">
                                 {gps.sharing
-                                    ? 'The buyer sees your real-time position. Updating every 10 seconds.'
+                                    ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · Updating continuously · Server sync every 10s`
                                     : 'Tap "Share GPS" to let the buyer track your location.'}
                             </p>
                             {gps.error && <p className="mt-1 text-xs font-medium text-red-600">{gps.error}</p>}
@@ -327,6 +393,9 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                             <div className="flex-shrink-0 text-right">
                                 <p className="text-[10px] font-mono text-emerald-600">
                                     {gps.location.lat.toFixed(4)}, {gps.location.lng.toFixed(4)}
+                                </p>
+                                <p className="text-[9px] font-mono text-emerald-500 mt-0.5">
+                                    {gps.snapMode === 'snapped' ? '⊙ snapped' : '◯ offroad'} · {gps.activeBearing.toFixed(0)}°
                                 </p>
                             </div>
                         )}
