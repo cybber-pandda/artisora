@@ -10,8 +10,6 @@ import {
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
 import { processGpsTick } from '@/Utils/SnapPipeline';
-import { useCompassHeading } from '@/Utils/useCompassHeading';
-import { computeIconState, resolveDisplayBearing, resolveHeadingSource } from '@/Utils/DriverIconState';
 
 // ── Status config ─────────────────────────────────────────────────
 const STATUS_CONFIG = {
@@ -80,11 +78,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
     const [snapMode, setSnapMode]               = useState('snapped');
     const [activeBearing, setActiveBearing]     = useState(0);
     const [pipelineRouteGeo, setPipelineRouteGeo] = useState(null);
-    const [iconState, setIconState]             = useState('puck');
     const [gpsAccuracy, setGpsAccuracy]         = useState(null);
-
-    // Compass heading hook
-    const compass = useCompassHeading();
 
     // Refs for mutable state that shouldn't trigger re-renders
     const watchIdRef           = useRef(null);
@@ -96,7 +90,6 @@ function useLocationService(deliveryId, shouldAutoStart) {
     const originalRouteCoordsRef = useRef(null);
     const prevSnapModeRef      = useRef('snapped');
     const lastKnownBearingRef  = useRef(0);
-    const iconStateRef         = useRef('puck');
 
     /**
      * Called by DeliveryMap via onRouteReady — stores the canonical route
@@ -132,20 +125,8 @@ function useLocationService(deliveryId, shouldAutoStart) {
         prevSnapModeRef.current       = result.snapMode;
         lastKnownBearingRef.current   = result.bearing;
 
-        // ── Icon state: hysteresis speed check ──
-        const speed = position.coords.speed;  // m/s or null
-        const newIconState = computeIconState(speed, iconStateRef.current);
-        iconStateRef.current = newIconState;
-        setIconState(newIconState);
-
-        // ── Resolve display bearing: compass (puck) vs GPS (vehicle) ──
-        const displayBearing = resolveDisplayBearing(
-            newIconState,
-            compass.compassHeading,
-            result.bearing,         // pipeline GPS bearing
-            compass.compassAvailable,
-            lastKnownBearingRef.current
-        );
+        // ── Use GPS pipeline bearing directly ──
+        const displayBearing = result.bearing;
 
         // ── Update React state ──
         const targetLng = result.targetPosition[0];
@@ -169,10 +150,10 @@ function useLocationService(deliveryId, shouldAutoStart) {
                 snap_mode: result.snapMode,
                 bearing:   displayBearing,
                 accuracy:  position.coords.accuracy ?? 0,
-                heading_source: resolveHeadingSource(newIconState, compass.compassAvailable),
+                heading_source: 'gps',
             }).catch(() => {});
         }
-    }, [deliveryId, compass.compassHeading, compass.compassAvailable]);
+    }, [deliveryId]);
 
     const start = useCallback(() => {
         if (!navigator.geolocation) {
@@ -187,7 +168,6 @@ function useLocationService(deliveryId, shouldAutoStart) {
         accumulatedOffroadRef.current = [];
         recentRawPositionsRef.current = [];
         prevSnapModeRef.current       = 'snapped';
-        iconStateRef.current          = 'puck';
 
         // Use watchPosition for continuous GPS ticks
         watchIdRef.current = navigator.geolocation.watchPosition(
@@ -226,13 +206,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
     return {
         sharing, start, stop, error, location,
         snapMode, activeBearing, pipelineRouteGeo,
-        handleRouteReady,
-        // New dual-state
-        iconState, gpsAccuracy,
-        compassAvailable: compass.compassAvailable,
-        needsCompassPermission: compass.needsPermission,
-        requestCompassPermission: compass.requestCompassPermission,
-        compassPermissionState: compass.permissionState,
+        handleRouteReady, gpsAccuracy,
     };
 }
 
@@ -364,7 +338,6 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                         activeBearing={gps.activeBearing}
                         snapMode={gps.snapMode}
                         routeGeometry={gps.pipelineRouteGeo}
-                        driverIconState={gps.iconState}
                         gpsAccuracy={gps.gpsAccuracy}
                         pickupLabel={`🎨 ${artist?.name ?? 'Artist'}`}
                         dropoffLabel={`📦 ${order.buyer_name}`}
@@ -440,20 +413,7 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                             )}
                         </div>
 
-                        {/* iOS Compass Permission Button */}
-                        {gps.needsCompassPermission && gps.sharing && (
-                            <button
-                                onClick={gps.requestCompassPermission}
-                                className="flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
-                            >
-                                🧭 Enable Compass for Direction Tracking
-                            </button>
-                        )}
-                        {gps.compassPermissionState === 'denied' && gps.sharing && (
-                            <p className="text-[10px] text-amber-600 text-center">
-                                Compass permission denied — using GPS heading only
-                            </p>
-                        )}
+
                     </div>
                 )}
 

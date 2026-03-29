@@ -594,7 +594,6 @@ const DeliveryMap = memo(DeliveryMapInner, (prevProps, nextProps) => {
         prevProps.activeBearing === nextProps.activeBearing &&
         prevProps.snapMode === nextProps.snapMode &&
         prevProps.routeGeometry === nextProps.routeGeometry &&
-        prevProps.driverIconState === nextProps.driverIconState &&
         prevProps.gpsAccuracy === nextProps.gpsAccuracy &&
         prevProps.className === nextProps.className
     );
