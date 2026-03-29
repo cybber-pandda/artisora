@@ -20,20 +20,37 @@ import Pusher from 'pusher-js';
 // Pusher must be on window for Echo to find it
 window.Pusher = Pusher;
 
+// Enable Pusher console logging so auth failures are visible in DevTools
+Pusher.logToConsole = import.meta.env.DEV;
+
 window.Echo = new Echo({
     broadcaster: 'pusher',
     key: import.meta.env.VITE_PUSHER_APP_KEY,
     cluster: import.meta.env.VITE_PUSHER_APP_CLUSTER,
     forceTLS: true,
-    // Use axios for auth so CSRF token is included automatically
+    // Use a custom authorizer that sends the CSRF cookie + session via axios.
+    // On Hostinger shared hosting, the session cookie & XSRF token are
+    // critical for the auth endpoint to recognize the logged-in user.
     authorizer: (channel) => ({
         authorize: (socketId, callback) => {
             axios.post('/broadcasting/auth', {
                 socket_id: socketId,
                 channel_name: channel.name,
+            }, {
+                // Ensure cookies (session + XSRF token) are sent with the request
+                withCredentials: true,
             })
-            .then(response => callback(null, response.data))
-            .catch(error => callback(error));
+            .then(response => {
+                callback(null, response.data);
+            })
+            .catch(error => {
+                console.error(
+                    `[Echo] Auth failed for ${channel.name}`,
+                    `Status: ${error.response?.status}`,
+                    `Body:`, error.response?.data || error.message,
+                );
+                callback(true, error);
+            });
         },
     }),
 });

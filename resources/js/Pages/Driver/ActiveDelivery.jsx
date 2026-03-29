@@ -415,7 +415,7 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                                 </p>
                                 <p className="text-xs text-ink-muted">
                                     {gps.sharing
-                                        ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · ${gps.iconState === 'puck' ? '🔵 Stationary' : '🚐 Moving'} · ${gps.compassAvailable ? '🧭 Compass' : '📡 GPS hdg'}`
+                                        ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · 🔵 Live · ${gps.activeBearing.toFixed(0)}° hdg`
                                         : 'Tap "Share GPS" to let the buyer track your location.'}
                                 </p>
                                 {gps.error && <p className="mt-1 text-xs font-medium text-red-600">{gps.error}</p>}

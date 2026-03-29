@@ -95,13 +95,40 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
     const watchdogRef        = useRef(null);
 
     // ═══════════════════════════════════════════════════════════════════
-    //  WebSocket listener + watchdog fallback
+    //  Hybrid tracking: Polling starts IMMEDIATELY, WebSocket upgrades it
     // ═══════════════════════════════════════════════════════════════════
     //
-    // Primary: Echo listens on private-orders.{orderId} for GPS events.
-    // Watchdog: If no WS event arrives for 20s, activates HTTP polling
-    //           as a fallback. Auto-disables when WS resumes.
+    // Strategy:
+    //  1. Start HTTP polling immediately on mount (guaranteed data flow)
+    //  2. Connect WebSocket in parallel (faster when available)
+    //  3. Once FIRST WebSocket event arrives, stop polling
+    //  4. Watchdog: if WebSocket goes silent for 20s, restart polling
     //
+    // This ensures the icon always moves, even if Pusher auth fails.
+    //
+
+    // ── Polling fetcher (used by both immediate poll and interval) ─────
+    const fetchDriverLocation = useCallback(async () => {
+        try {
+            const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
+
+            if (isValidCoordinate(data.driver_lat, data.driver_lng)) {
+                setDelivery(prev => ({
+                    ...prev,
+                    driver_lat:           data.driver_lat,
+                    driver_lng:           data.driver_lng,
+                    status:               data.status,
+                    estimated_arrival_at: data.estimated_arrival_at,
+                    adjusted_eta:         data.adjusted_eta,
+                }));
+                setLastUpdated(new Date());
+                lastUpdateRef.current = Date.now();
+            }
+        } catch {
+            // Silently ignore — will retry on next interval
+        }
+    }, [delivery.id]);
+
     useEffect(() => {
         const orderId = order.id;
         if (!orderId) return;
@@ -109,58 +136,71 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
         // Don't track if delivery is done
         if (delivery.status === 'delivered') return;
 
-        // Guard: Echo must be initialized
-        if (!window.Echo) {
-            console.warn('[TrackOrder] Echo not initialized — falling back to polling');
-            activateFallback();
-            return;
+        // ── 1. Start polling IMMEDIATELY (guaranteed updates) ─────────
+        // Do one fetch right away so the icon position is fresh
+        fetchDriverLocation();
+
+        // Then poll every 10 seconds
+        fallbackIntervalRef.current = setInterval(fetchDriverLocation, 10_000);
+        setConnectionMode('polling');
+
+        // ── 2. Connect WebSocket in parallel (upgrade path) ──────────
+        let channel = null;
+
+        if (window.Echo) {
+            try {
+                channel = window.Echo.private(`orders.${orderId}`);
+
+                channel.listen('.DriverLocationUpdated', (event) => {
+                    // Validate incoming coordinates
+                    if (!isValidCoordinate(event.latitude, event.longitude)) {
+                        console.warn('[TrackOrder] Invalid WS coordinates:', event);
+                        return;
+                    }
+
+                    // ── Update delivery state with new GPS data ──
+                    setDelivery(prev => ({
+                        ...prev,
+                        driver_lat: event.latitude,
+                        driver_lng: event.longitude,
+                    }));
+
+                    setLastUpdated(new Date());
+                    lastUpdateRef.current = Date.now();
+
+                    // ── WebSocket is working — stop polling to save resources ──
+                    if (fallbackIntervalRef.current) {
+                        console.log('[TrackOrder] WebSocket active — stopping polling');
+                        clearInterval(fallbackIntervalRef.current);
+                        fallbackIntervalRef.current = null;
+                        setConnectionMode('websocket');
+                    }
+                });
+
+                // ── 3. Watchdog: restart polling if WS goes silent ────────
+                watchdogRef.current = setInterval(() => {
+                    const timeSinceUpdate = Date.now() - lastUpdateRef.current;
+
+                    if (timeSinceUpdate > 20_000 && !fallbackIntervalRef.current) {
+                        console.warn('[TrackOrder] WebSocket stale (20s), restarting polling');
+                        fallbackIntervalRef.current = setInterval(fetchDriverLocation, 10_000);
+                        setConnectionMode('polling');
+                    }
+                }, 5_000);
+            } catch (err) {
+                console.warn('[TrackOrder] Echo subscribe failed:', err);
+                // Polling is already running, so we're fine
+            }
+        } else {
+            console.warn('[TrackOrder] Echo not available — using polling only');
         }
 
-        // ── Subscribe to private channel ──────────────────────────────
-        const channel = window.Echo.private(`orders.${orderId}`);
-
-        channel.listen('.DriverLocationUpdated', (event) => {
-            // Validate incoming coordinates
-            if (!isValidCoordinate(event.latitude, event.longitude)) {
-                console.warn('[TrackOrder] Invalid coordinates received:', event);
-                return;
-            }
-
-            // ── Update delivery state with new GPS data ──
-            setDelivery(prev => ({
-                ...prev,
-                driver_lat: event.latitude,
-                driver_lng: event.longitude,
-            }));
-
-            setLastUpdated(new Date());
-            lastUpdateRef.current = Date.now();
-
-            // ── If fallback polling was active, disable it ──
-            if (fallbackIntervalRef.current) {
-                console.log('[TrackOrder] WebSocket resumed — disabling fallback');
-                clearInterval(fallbackIntervalRef.current);
-                fallbackIntervalRef.current = null;
-                setConnectionMode('websocket');
-            }
-        });
-
-        // ── Watchdog: detect stale WebSocket connection ──────────────
-        // Checks every 5s. If no update for 20s, activates HTTP polling.
-        watchdogRef.current = setInterval(() => {
-            const timeSinceUpdate = Date.now() - lastUpdateRef.current;
-
-            if (timeSinceUpdate > 20_000 && !fallbackIntervalRef.current) {
-                console.warn('[TrackOrder] WebSocket stale (20s), activating fallback');
-                activateFallback();
-            }
-        }, 5_000);
-
-        // ── Cleanup on unmount or status change ──────────────────────
+        // ── Cleanup on unmount ───────────────────────────────────────
         return () => {
-            channel.stopListening('.DriverLocationUpdated');
-            window.Echo.leave(`orders.${orderId}`);
-
+            if (channel) {
+                channel.stopListening('.DriverLocationUpdated');
+                window.Echo?.leave(`orders.${orderId}`);
+            }
             if (watchdogRef.current) {
                 clearInterval(watchdogRef.current);
                 watchdogRef.current = null;
@@ -171,36 +211,7 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
             }
         };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [order.id, delivery.status]);
-
-    // ── Fallback polling activator ────────────────────────────────────
-    // Uses the existing pollLocation endpoint as backup when WS fails.
-    function activateFallback() {
-        if (fallbackIntervalRef.current) return; // Already running
-
-        setConnectionMode('polling');
-
-        fallbackIntervalRef.current = setInterval(async () => {
-            try {
-                const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
-
-                if (isValidCoordinate(data.driver_lat, data.driver_lng)) {
-                    setDelivery(prev => ({
-                        ...prev,
-                        driver_lat:           data.driver_lat,
-                        driver_lng:           data.driver_lng,
-                        status:               data.status,
-                        estimated_arrival_at: data.estimated_arrival_at,
-                        adjusted_eta:         data.adjusted_eta,
-                    }));
-                    setLastUpdated(new Date());
-                    lastUpdateRef.current = Date.now();
-                }
-            } catch {
-                // Silently ignore — will retry on next interval
-            }
-        }, 10_000);
-    }
+    }, [order.id]);
 
     // ═══════════════════════════════════════════════════════════════════
     //  Derived values
