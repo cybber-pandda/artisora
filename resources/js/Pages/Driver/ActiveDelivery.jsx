@@ -168,6 +168,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
                 raw_lng: result.rawPosition[0],
                 snap_mode: result.snapMode,
                 bearing:   displayBearing,
+                accuracy:  position.coords.accuracy ?? 0,
                 heading_source: resolveHeadingSource(newIconState, compass.compassAvailable),
             }).catch(() => {});
         }

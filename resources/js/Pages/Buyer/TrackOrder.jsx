@@ -1,14 +1,16 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import AppLayout from '@/Layouts/AppLayout';
 import { Head } from '@inertiajs/react';
 import { motion } from 'framer-motion';
 import {
     Truck, Package, Clock, CheckCircle, MapPin,
     User, Navigation, RefreshCw, AlertCircle, Route,
+    Wifi, WifiOff,
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
 
+// ── Status Stepper ────────────────────────────────────────────────────
 const STATUS_STEPS = [
     { key: 'pending_driver', label: 'Driver Assigned' },
     { key: 'searching',      label: 'Finding Driver' },
@@ -60,38 +62,149 @@ function StatusStepper({ status }) {
     );
 }
 
+// ── Coordinate Validation ─────────────────────────────────────────────
+/**
+ * Validate that lat/lng are real WGS84 coordinates.
+ * Rejects null, zero, and out-of-bounds values.
+ */
+function isValidCoordinate(lat, lng) {
+    return (
+        lat !== null && lat !== undefined &&
+        lng !== null && lng !== undefined &&
+        lat !== 0 && lng !== 0 &&
+        lat >= -90 && lat <= 90 &&
+        lng >= -180 && lng <= 180
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  MAIN COMPONENT — TrackOrder (Buyer's real-time delivery tracking)
+// ═══════════════════════════════════════════════════════════════════════
 export default function TrackOrder({ order, delivery: initialDelivery }) {
     const [delivery, setDelivery] = useState(initialDelivery);
     const [lastUpdated, setLastUpdated] = useState(new Date());
-    const [polling, setPolling] = useState(true);
     const [routeInfo, setRouteInfo] = useState(null);
 
-    // ── Poll driver location every 10 seconds ────────────────────
-    // The driver-side pipeline handles all snapping/filtering.
-    // Server returns already-processed coordinates.
-    const poll = useCallback(async () => {
-        if (!polling || delivery.status === 'delivered') return;
-        try {
-            const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
+    // ── Connection state ──────────────────────────────────────────────
+    // 'websocket' = live push updates, 'polling' = fallback HTTP
+    const [connectionMode, setConnectionMode] = useState('websocket');
 
+    // ── Refs for watchdog / fallback ──────────────────────────────────
+    const lastUpdateRef      = useRef(Date.now());
+    const fallbackIntervalRef = useRef(null);
+    const watchdogRef        = useRef(null);
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  WebSocket listener + watchdog fallback
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // Primary: Echo listens on private-orders.{orderId} for GPS events.
+    // Watchdog: If no WS event arrives for 20s, activates HTTP polling
+    //           as a fallback. Auto-disables when WS resumes.
+    //
+    useEffect(() => {
+        const orderId = order.id;
+        if (!orderId) return;
+
+        // Don't track if delivery is done
+        if (delivery.status === 'delivered') return;
+
+        // Guard: Echo must be initialized
+        if (!window.Echo) {
+            console.warn('[TrackOrder] Echo not initialized — falling back to polling');
+            activateFallback();
+            return;
+        }
+
+        // ── Subscribe to private channel ──────────────────────────────
+        const channel = window.Echo.private(`orders.${orderId}`);
+
+        channel.listen('.DriverLocationUpdated', (event) => {
+            // Validate incoming coordinates
+            if (!isValidCoordinate(event.latitude, event.longitude)) {
+                console.warn('[TrackOrder] Invalid coordinates received:', event);
+                return;
+            }
+
+            // ── Update delivery state with new GPS data ──
             setDelivery(prev => ({
                 ...prev,
-                driver_lat:           data.driver_lat,
-                driver_lng:           data.driver_lng,
-                status:               data.status,
-                estimated_arrival_at: data.estimated_arrival_at,
-                adjusted_eta:         data.adjusted_eta,
+                driver_lat: event.latitude,
+                driver_lng: event.longitude,
             }));
-            setLastUpdated(new Date());
-        } catch (e) {
-            // silently ignore
-        }
-    }, [delivery.id, delivery.status, polling]);
 
-    useEffect(() => {
-        const interval = setInterval(poll, 10000);
-        return () => clearInterval(interval);
-    }, [poll]);
+            setLastUpdated(new Date());
+            lastUpdateRef.current = Date.now();
+
+            // ── If fallback polling was active, disable it ──
+            if (fallbackIntervalRef.current) {
+                console.log('[TrackOrder] WebSocket resumed — disabling fallback');
+                clearInterval(fallbackIntervalRef.current);
+                fallbackIntervalRef.current = null;
+                setConnectionMode('websocket');
+            }
+        });
+
+        // ── Watchdog: detect stale WebSocket connection ──────────────
+        // Checks every 5s. If no update for 20s, activates HTTP polling.
+        watchdogRef.current = setInterval(() => {
+            const timeSinceUpdate = Date.now() - lastUpdateRef.current;
+
+            if (timeSinceUpdate > 20_000 && !fallbackIntervalRef.current) {
+                console.warn('[TrackOrder] WebSocket stale (20s), activating fallback');
+                activateFallback();
+            }
+        }, 5_000);
+
+        // ── Cleanup on unmount or status change ──────────────────────
+        return () => {
+            channel.stopListening('.DriverLocationUpdated');
+            window.Echo.leave(`orders.${orderId}`);
+
+            if (watchdogRef.current) {
+                clearInterval(watchdogRef.current);
+                watchdogRef.current = null;
+            }
+            if (fallbackIntervalRef.current) {
+                clearInterval(fallbackIntervalRef.current);
+                fallbackIntervalRef.current = null;
+            }
+        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [order.id, delivery.status]);
+
+    // ── Fallback polling activator ────────────────────────────────────
+    // Uses the existing pollLocation endpoint as backup when WS fails.
+    function activateFallback() {
+        if (fallbackIntervalRef.current) return; // Already running
+
+        setConnectionMode('polling');
+
+        fallbackIntervalRef.current = setInterval(async () => {
+            try {
+                const { data } = await axios.get(route('buyer.delivery.location', delivery.id));
+
+                if (isValidCoordinate(data.driver_lat, data.driver_lng)) {
+                    setDelivery(prev => ({
+                        ...prev,
+                        driver_lat:           data.driver_lat,
+                        driver_lng:           data.driver_lng,
+                        status:               data.status,
+                        estimated_arrival_at: data.estimated_arrival_at,
+                        adjusted_eta:         data.adjusted_eta,
+                    }));
+                    setLastUpdated(new Date());
+                    lastUpdateRef.current = Date.now();
+                }
+            } catch {
+                // Silently ignore — will retry on next interval
+            }
+        }, 10_000);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Derived values
+    // ═══════════════════════════════════════════════════════════════════
 
     const formattedEta = delivery.adjusted_eta
         ? new Date(delivery.adjusted_eta).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
@@ -133,7 +246,7 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
                         Tracking Order #{order.id}
                     </h2>
                     <p className="mt-1 text-sm text-ink-muted">
-                        Live updates every 10 seconds · Last updated: {lastUpdated.toLocaleTimeString()}
+                        {connectionMode === 'websocket' ? 'Real-time updates' : 'Polling every 10 seconds'} · Last updated: {lastUpdated.toLocaleTimeString()}
                     </p>
                 </div>
 
@@ -275,11 +388,22 @@ export default function TrackOrder({ order, delivery: initialDelivery }) {
                     </div>
                 </div>
 
-                {/* Polling indicator */}
+                {/* Connection status indicator */}
                 {!isDelivered && (
-                    <div className="flex items-center justify-center gap-2 text-xs text-ink-muted">
-                        <RefreshCw size={12} className="animate-spin" />
-                        Auto-refreshing location every 10 seconds
+                    <div className={`flex items-center justify-center gap-2 text-xs ${
+                        connectionMode === 'websocket' ? 'text-emerald-600' : 'text-amber-600'
+                    }`}>
+                        {connectionMode === 'websocket' ? (
+                            <>
+                                <Wifi size={12} className="animate-pulse" />
+                                Connected — receiving real-time updates
+                            </>
+                        ) : (
+                            <>
+                                <WifiOff size={12} />
+                                Reconnecting... using fallback polling (every 10s)
+                            </>
+                        )}
                     </div>
                 )}
             </div>

@@ -28,7 +28,9 @@
         "@turf/helpers": "^7.3.4",
         "@turf/nearest-point-on-line": "^7.3.4",
         "framer-motion": "^12.38.0",
+        "laravel-echo": "^2.3.1",
         "lucide-react": "^0.577.0",
-        "maplibre-gl": "^5.21.1"
+        "maplibre-gl": "^5.21.1",
+        "pusher-js": "^8.4.3"
     }
 }

@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -337,18 +338,54 @@ class DeliveryController extends Controller
 
     /**
      * Driver updates live location.
+     *
+     * Pipeline:
+     *  1. Auth check (existing)
+     *  2. Validate payload (lat, lng, bearing, accuracy, snap_mode)
+     *  3. Rate limit — max 1 update per 3 seconds per delivery (Cache::add)
+     *  4. Distance dedup — skip if moved < 5 meters (saves Pusher messages)
+     *  5. Persist to DB
+     *  6. Fire DriverLocationUpdated event → Pusher → Buyer's Echo listener
      */
     public function updateLocation(Request $request, Delivery $delivery): JsonResponse
     {
         abort_if($delivery->driver_id !== Auth::id(), 403);
 
         $request->validate([
-            'lat'     => ['required', 'numeric', 'between:-90,90'],
-            'lng'     => ['required', 'numeric', 'between:-180,180'],
-            'raw_lat' => ['nullable', 'numeric', 'between:-90,90'],
-            'raw_lng' => ['nullable', 'numeric', 'between:-180,180'],
+            'lat'       => ['required', 'numeric', 'between:-90,90'],
+            'lng'       => ['required', 'numeric', 'between:-180,180'],
+            'raw_lat'   => ['nullable', 'numeric', 'between:-90,90'],
+            'raw_lng'   => ['nullable', 'numeric', 'between:-180,180'],
+            'bearing'   => ['nullable', 'numeric', 'between:0,360'],
+            'accuracy'  => ['nullable', 'numeric', 'min:0'],
+            'snap_mode' => ['nullable', 'string', 'in:snapped,offroad'],
         ]);
 
+        // ── Rate limit: max 1 update per 3 seconds per delivery ──
+        $throttleKey = "loc_throttle:{$delivery->id}";
+        if (! Cache::add($throttleKey, true, 3)) {
+            return response()->json(['ok' => true, 'throttled' => true]);
+        }
+
+        // ── Distance-based deduplication: skip if < 5 meters ──
+        $cacheKey = "loc_last:{$delivery->id}";
+        $lastPos  = Cache::get($cacheKey);
+
+        $shouldBroadcast = true;
+        if ($lastPos) {
+            $dist = $this->haversineMeters(
+                $lastPos['lat'], $lastPos['lng'],
+                $request->lat, $request->lng
+            );
+            if ($dist < 5) {
+                $shouldBroadcast = false; // Save Pusher messages
+            }
+        }
+
+        // Always cache the latest position (5 min TTL)
+        Cache::put($cacheKey, ['lat' => $request->lat, 'lng' => $request->lng], 300);
+
+        // ── Persist to database ──
         $delivery->update([
             'driver_lat'     => $request->lat,
             'driver_lng'     => $request->lng,
@@ -356,7 +393,24 @@ class DeliveryController extends Controller
             'raw_driver_lng' => $request->raw_lng ?? $request->lng,
         ]);
 
-        return response()->json(['ok' => true]);
+        // ── Broadcast to buyer via Pusher (only if moved significantly) ──
+        if ($shouldBroadcast) {
+            $orderId = $delivery->order_id;
+
+            event(new \App\Events\DriverLocationUpdated(
+                orderId:  $orderId,
+                latitude:  (float) $request->lat,
+                longitude: (float) $request->lng,
+                bearing:   (float) ($request->bearing ?? 0),
+                accuracy:  (float) ($request->accuracy ?? 0),
+                snapMode:  $request->snap_mode ?? 'snapped',
+            ));
+        }
+
+        return response()->json([
+            'ok'        => true,
+            'broadcast' => $shouldBroadcast,
+        ]);
     }
 
     /**
@@ -537,6 +591,21 @@ class DeliveryController extends Controller
             'claimed_at'           => $d->claimed_at?->toIso8601String(),
             'created_at'           => $d->created_at->toDateTimeString(),
         ];
+    }
+
+    /**
+     * Calculate distance between two coordinates in meters using the Haversine formula.
+     */
+    private function haversineMeters(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $R = 6371000; // Earth radius in meters
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLng = deg2rad($lng2 - $lng1);
+        $a = sin($dLat / 2) * sin($dLat / 2)
+           + cos(deg2rad($lat1)) * cos(deg2rad($lat2))
+           * sin($dLng / 2) * sin($dLng / 2);
+        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+        return $R * $c;
     }
 
     private function formatDeliveryForBuyer(Delivery $d): array
