@@ -114,7 +114,9 @@ function DeliveryMapInner({
     const initialRouteDrawn   = useRef(false);
     const routeGeometryRef    = useRef(null);
     const lerpRef             = useRef(null);
-    const [mapReady, setMapReady] = useState(false);
+    const isFollowingRef      = useRef(true);    // whether camera auto-follows driver
+    const [mapReady, setMapReady]       = useState(false);
+    const [isFollowing, setIsFollowing] = useState(true);
 
     // ── Bootstrap map ─────────────────────────────────────────────
     useEffect(() => {
@@ -140,6 +142,15 @@ function DeliveryMapInner({
 
         mapRef.current = map;
         map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+        // Detect user-initiated panning/pinching → disable auto-follow.
+        // e.originalEvent is only set on user gestures, not programmatic moves.
+        map.on('movestart', (e) => {
+            if (e.originalEvent) {
+                isFollowingRef.current = false;
+                setIsFollowing(false);
+            }
+        });
 
         map.on('load', () => {
             setMapReady(true);
@@ -187,6 +198,10 @@ function DeliveryMapInner({
                 if (driverMarker.current) {
                     driverMarker.current.setLngLat([lng, lat]);
                 }
+                // Keep the map centered on the driver while auto-follow is active
+                if (isFollowingRef.current) {
+                    mapRef.current.setCenter([lng, lat]);
+                }
             },
             onFrameSync: ({ lat, lng, bearing, routeGeometry: routeGeo }) => {
                 if (!mapRef.current) return;
@@ -197,7 +212,7 @@ function DeliveryMapInner({
 
                 // 1. Update heading wedge rotation
                 if (typeof bearing === 'number' && driverHeadingEl.current) {
-                    driverHeadingEl.current.style.transform = `rotate(${bearing}deg)`;
+                    driverHeadingEl.current.style.transform = `translate(-50%, -50%) rotate(${bearing}deg)`;
                 }
 
                 // 1b. Update accuracy circle position
@@ -233,13 +248,8 @@ function DeliveryMapInner({
                     });
                 }
             },
-            onComplete: ({ lat, lng }) => {
-                if (mapRef.current) {
-                    mapRef.current.easeTo({
-                        center: [lng, lat],
-                        duration: 600,
-                    });
-                }
+            onComplete: () => {
+                // Camera follow is handled per-frame in onFrame above.
             },
         });
 
@@ -307,6 +317,18 @@ function DeliveryMapInner({
             lerpRef.current.setBearing(activeBearing);
         }
     }, [activeBearing]);
+
+    // ── Re-center: snap camera back to driver and re-enable auto-follow ──
+    const reCenter = useCallback(() => {
+        if (!mapRef.current || !driverLocation) return;
+        isFollowingRef.current = true;
+        setIsFollowing(true);
+        mapRef.current.easeTo({
+            center: [driverLocation.lng, driverLocation.lat],
+            zoom: Math.max(mapRef.current.getZoom(), 15),
+            duration: 800,
+        });
+    }, [driverLocation]);
 
     // Icon state prop is ignored — blue dot is always shown.
     // Kept for API compatibility with ActiveDelivery.
@@ -566,7 +588,10 @@ function DeliveryMapInner({
                 .eta-text{font-size:13px;font-weight:700;color:#1d4ed8}
                 .eta-dist{font-size:10px;color:#64748b;font-weight:500}
             `}</style>
+
+            {/* Map container — ref must stay here so MapLibre reads the correct height */}
             <div ref={containerRef} className={`relative w-full overflow-hidden ${className}`}>
+
                 {!KEY && (
                     <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-stone-100">
                         <span className="text-2xl">🗺️</span>
@@ -574,6 +599,21 @@ function DeliveryMapInner({
                         <p className="text-xs text-stone-400">VITE_MAPTILER_API_KEY not set</p>
                     </div>
                 )}
+
+                {/* Re-center button — absolutely positioned inside the map container */}
+                {!isFollowing && driverLocation && (
+                    <button
+                        onClick={reCenter}
+                        className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-semibold text-blue-600 shadow-lg border border-blue-100 hover:bg-blue-50 active:scale-95 transition-all"
+                    >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+                        </svg>
+                        Re-center
+                    </button>
+                )}
+
             </div>
         </>
     );
