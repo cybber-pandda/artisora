@@ -95,6 +95,10 @@ Route::middleware(['auth', 'role:artist'])->prefix('artist')->group(function () 
     Route::post('/orders/{order}/dispatch/assign',  [DeliveryController::class, 'assignTrustedDriver'])->name('artist.dispatch.assign');
     Route::post('/orders/{order}/dispatch/publish', [DeliveryController::class, 'publishToFreelance'])->name('artist.dispatch.publish');
 
+    // ── Live tracking (artist view) ───────────────────────────────
+    Route::get('/orders/{order}/track',               [DeliveryController::class, 'artistTrackingView'])->name('artist.track');
+    Route::get('/deliveries/{delivery}/location',     [DeliveryController::class, 'artistPollLocation'])->name('artist.delivery.location');
+
     // ── Trusted driver management ─────────────────────────────────
     Route::get('/trusted-drivers',             [DeliveryController::class, 'trustedDriversIndex'])->name('artist.trusted-drivers');
     Route::get('/trusted-drivers/search',      [DeliveryController::class, 'searchDrivers'])->name('artist.trusted-drivers.search');

@@ -279,10 +279,13 @@ function OrderCard({ order }) {
                                 )}
 
                                 {order.status === 'shipped' && (
-                                    <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700">
+                                    <a
+                                        href={route('artist.track', order.id)}
+                                        className="flex w-full items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 transition-colors hover:bg-blue-100 hover:border-blue-300"
+                                    >
                                         <Truck size={15} />
-                                        Dispatched — Driver is handling delivery
-                                    </div>
+                                        Track Delivery →
+                                    </a>
                                 )}
 
                                 {order.status === 'completed' && (

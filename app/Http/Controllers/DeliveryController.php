@@ -558,6 +558,54 @@ class DeliveryController extends Controller
         ]);
     }
 
+    // ════════════════════════════════════════════════════════════
+    //  ARTIST — Live Tracking View
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * Show the artist their own dispatched order on a live map.
+     */
+    public function artistTrackingView(Order $order): Response
+    {
+        $this->authorizeArtist($order);
+
+        $delivery = $order->delivery;
+        abort_if(!$delivery, 404, 'No delivery found for this order.');
+
+        $delivery->load('driver.driverProfile');
+
+        return Inertia::render('Artist/TrackOrder', [
+            'order' => [
+                'id'           => $order->id,
+                'buyer_name'   => $order->full_name,
+                'address'      => implode(', ', array_filter([
+                    $order->address_line, $order->city,
+                    $order->province, $order->postal_code,
+                ])),
+                'delivery_lat' => $order->delivery_lat,
+                'delivery_lng' => $order->delivery_lng,
+            ],
+            'delivery' => $this->formatDeliveryForBuyer($delivery),
+        ]);
+    }
+
+    /**
+     * Artist polls driver location (JSON endpoint).
+     */
+    public function artistPollLocation(Delivery $delivery): JsonResponse
+    {
+        // Ensure the artist owns the order
+        abort_if($delivery->artist_id !== Auth::id(), 403);
+
+        return response()->json([
+            'driver_lat'           => $delivery->driver_lat,
+            'driver_lng'           => $delivery->driver_lng,
+            'status'               => $delivery->status,
+            'estimated_arrival_at' => $delivery->estimated_arrival_at?->toIso8601String(),
+            'adjusted_eta'         => $delivery->adjustedEta(),
+        ]);
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  Private helpers
     // ══════════════════════════════════════════════════════════════
