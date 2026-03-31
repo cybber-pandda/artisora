@@ -21,7 +21,32 @@ class ArtistProfile extends Model
         'cover_photo_path',
         'latitude',
         'longitude',
+        'meetup_location_label',
+        'meetup_radius_km',
+        'pickup_lat',
+        'pickup_lng',
+        'pickup_location_label',
     ];
+
+    protected $casts = [
+        'latitude'         => 'float',
+        'longitude'        => 'float',
+        'meetup_radius_km' => 'float',
+        'pickup_lat'       => 'float',
+        'pickup_lng'       => 'float',
+    ];
+
+    /** True if the artist has set a default meet-up anchor */
+    public function hasMeetupLocation(): bool
+    {
+        return $this->latitude !== null && $this->longitude !== null;
+    }
+
+    /** True if the artist has set a pickup / workshop address */
+    public function hasPickupLocation(): bool
+    {
+        return $this->pickup_lat !== null && $this->pickup_lng !== null;
+    }
 
     public function user(): BelongsTo
     {

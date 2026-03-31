@@ -20,9 +20,34 @@ class ProfileController extends Controller
 
     public function edit(Request $request): Response
     {
+        $user    = $request->user();
+        $profile = $user->artistProfile;
+
+        $meetupLocation = null;
+        if ($user->isArtist() && $profile?->hasMeetupLocation()) {
+            $meetupLocation = [
+                'lat'    => $profile->latitude,
+                'lng'    => $profile->longitude,
+                'label'  => $profile->meetup_location_label,
+                'radius' => $profile->meetup_radius_km ?? 10,
+            ];
+        }
+
+        $pickupLocation = null;
+        if ($user->isArtist() && $profile?->hasPickupLocation()) {
+            $pickupLocation = [
+                'lat'   => $profile->pickup_lat,
+                'lng'   => $profile->pickup_lng,
+                'label' => $profile->pickup_location_label,
+            ];
+        }
+
         return Inertia::render('Profile/Edit', [
-            'mustVerifyEmail' => $request->user() instanceof \Illuminate\Contracts\Auth\MustVerifyEmail,
+            'mustVerifyEmail' => $user instanceof \Illuminate\Contracts\Auth\MustVerifyEmail,
             'status'          => session('status'),
+            'meetupLocation'  => $meetupLocation,
+            'pickupLocation'  => $pickupLocation,
+            'isArtist'        => $user->isArtist(),
         ]);
     }
 
@@ -57,6 +82,80 @@ class ProfileController extends Controller
         $request->session()->regenerateToken();
 
         return Redirect::to('/');
+    }
+
+    // ── Artist meet-up anchor ─────────────────────────────────────
+
+    /** JSON: returns artist's default meet-up anchor (called by buyer checkout). */
+    public function getMeetupLocation(int $artistId): JsonResponse
+    {
+        $artist  = \App\Models\User::find($artistId);
+        $profile = $artist?->artistProfile;
+
+        if (!$profile || !$profile->hasMeetupLocation()) {
+            return response()->json(['anchor' => null]);
+        }
+
+        return response()->json([
+            'anchor' => [
+                'lat'    => $profile->latitude,
+                'lng'    => $profile->longitude,
+                'label'  => $profile->meetup_location_label,
+                'radius' => $profile->meetup_radius_km,
+            ],
+        ]);
+    }
+
+    /** POST: artist saves their default meet-up anchor from profile settings. */
+    public function updateMeetupLocation(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        abort_unless($user->isArtist(), 403);
+
+        $request->validate([
+            'lat'       => ['required', 'numeric', 'between:-90,90'],
+            'lng'       => ['required', 'numeric', 'between:-180,180'],
+            'label'     => ['required', 'string', 'max:255'],
+            'radius_km' => ['nullable', 'numeric', 'min:1', 'max:200'],
+        ]);
+
+        $profile = $user->artistProfile ?? $user->artistProfile()->create([
+            'display_name' => $user->name,
+        ]);
+
+        $profile->update([
+            'latitude'              => $request->lat,
+            'longitude'             => $request->lng,
+            'meetup_location_label' => $request->label,
+            'meetup_radius_km'      => $request->radius_km ?? 10,
+        ]);
+
+        return back()->with('status', 'Meet-up location saved!');
+    }
+
+    /** POST: artist saves their pickup / workshop location from profile settings. */
+    public function updatePickupLocation(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        abort_unless($user->isArtist(), 403);
+
+        $request->validate([
+            'lat'   => ['required', 'numeric', 'between:-90,90'],
+            'lng'   => ['required', 'numeric', 'between:-180,180'],
+            'label' => ['required', 'string', 'max:255'],
+        ]);
+
+        $profile = $user->artistProfile ?? $user->artistProfile()->create([
+            'display_name' => $user->name,
+        ]);
+
+        $profile->update([
+            'pickup_lat'            => $request->lat,
+            'pickup_lng'            => $request->lng,
+            'pickup_location_label' => $request->label,
+        ]);
+
+        return back()->with('status', 'Pickup location saved!');
     }
 
     // ── Update social profile (bio, photos) ──────────────────────

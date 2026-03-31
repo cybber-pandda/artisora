@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Delivery;
 use App\Models\Order;
 use App\Models\User;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -71,8 +72,10 @@ class DeliveryController extends Controller
             ] : null,
             'trustedDrivers'  => $trustedDrivers,
             'artistCoords'    => [
-                'lat' => Auth::user()->artistProfile?->latitude,
-                'lng' => Auth::user()->artistProfile?->longitude,
+                'lat' => Auth::user()->artistProfile?->pickup_lat
+                      ?? Auth::user()->artistProfile?->latitude,
+                'lng' => Auth::user()->artistProfile?->pickup_lng
+                      ?? Auth::user()->artistProfile?->longitude,
             ],
             'existingDelivery' => $order->delivery ? $order->delivery->id : null,
         ]);
@@ -466,9 +469,13 @@ class DeliveryController extends Controller
             ],
             'artist' => [
                 'name'    => $delivery->artist?->artistProfile?->display_name ?? $delivery->artist?->name,
-                'address' => $delivery->artist?->artistProfile?->city_coverage ?? 'Artist Location',
-                'lat'     => $delivery->artist?->artistProfile?->latitude,
-                'lng'     => $delivery->artist?->artistProfile?->longitude,
+                'address' => $delivery->artist?->artistProfile?->pickup_location_label
+                          ?? $delivery->artist?->artistProfile?->city_coverage
+                          ?? 'Artist Location',
+                'lat'     => $delivery->artist?->artistProfile?->pickup_lat
+                          ?? $delivery->artist?->artistProfile?->latitude,
+                'lng'     => $delivery->artist?->artistProfile?->pickup_lng
+                          ?? $delivery->artist?->artistProfile?->longitude,
             ],
         ]);
     }
@@ -493,21 +500,29 @@ class DeliveryController extends Controller
     /**
      * Driver marks delivery as completed.
      */
-    public function markDelivered(Delivery $delivery): RedirectResponse
+    public function markDelivered(Request $request, Delivery $delivery): RedirectResponse
     {
         abort_if($delivery->driver_id !== Auth::id(), 403);
         abort_if(!in_array($delivery->status, [Delivery::STATUS_IN_TRANSIT, Delivery::STATUS_PICKED_UP]), 422, 'Cannot mark as delivered yet.');
 
+        $request->validate([
+            'proof' => ['required', 'image', 'max:5120'], // 5 MB
+        ]);
+
+        $proofPath = $request->file('proof')->store('delivery-proofs', 's3');
+
         $delivery->update([
             'status'       => Delivery::STATUS_DELIVERED,
             'delivered_at' => now(),
+            'proof_path'   => $proofPath,
+            'proof_at'     => now(),
         ]);
 
-        // Also mark the order as completed for the buyer
-        $delivery->order->update(['status' => 'completed']);
+        // Note: Order stays 'shipped' until buyer confirms receipt
+        // (consistent with meetup proof → buyer confirmation flow)
 
         return redirect()->route('driver.active-delivery', $delivery->id)
-            ->with('success', '🎉 Delivery completed! Great work.');
+            ->with('success', '🎉 Proof uploaded! Awaiting buyer confirmation.');
     }
 
 
@@ -675,6 +690,9 @@ class DeliveryController extends Controller
             'adjusted_eta'         => $d->adjustedEta(),
             'picked_up_at'         => $d->picked_up_at?->toIso8601String(),
             'delivered_at'         => $d->delivered_at?->toIso8601String(),
+            'proof_url'            => $d->proof_path
+                ? Storage::disk('s3')->temporaryUrl($d->proof_path, now()->addMinutes(30))
+                : null,
             'driver' => $d->driver ? [
                 'name'         => $d->driver->name,
                 'vehicle_type' => $d->driver->driverProfile?->vehicle_type,

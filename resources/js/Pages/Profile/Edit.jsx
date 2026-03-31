@@ -3,8 +3,10 @@ import { Head } from '@inertiajs/react';
 import DeleteUserForm from './Partials/DeleteUserForm';
 import UpdatePasswordForm from './Partials/UpdatePasswordForm';
 import UpdateProfileInformationForm from './Partials/UpdateProfileInformationForm';
+import UpdateMeetupLocationForm from './Partials/UpdateMeetupLocationForm';
+import UpdatePickupLocationForm from './Partials/UpdatePickupLocationForm';
 
-export default function Edit({ mustVerifyEmail, status }) {
+export default function Edit({ mustVerifyEmail, status, isArtist, meetupLocation, pickupLocation }) {
     return (
         <AppLayout title="My Profile">
             <Head title="Profile" />
@@ -27,6 +29,20 @@ export default function Edit({ mustVerifyEmail, status }) {
                         status={status}
                     />
                 </div>
+
+                {/* Meet-up Location — artists only */}
+                {isArtist && (
+                    <div className="rounded-xl border border-border bg-surface p-6 shadow-xs">
+                        <UpdateMeetupLocationForm meetupLocation={meetupLocation} />
+                    </div>
+                )}
+
+                {/* Pickup Location — artists only */}
+                {isArtist && (
+                    <div className="rounded-xl border border-border bg-surface p-6 shadow-xs">
+                        <UpdatePickupLocationForm pickupLocation={pickupLocation} />
+                    </div>
+                )}
 
                 {/* Update Password */}
                 <div className="rounded-xl border border-border bg-surface p-6 shadow-xs">

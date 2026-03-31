@@ -17,6 +17,7 @@ class Delivery extends Model
         'raw_driver_lat', 'raw_driver_lng',
         'estimated_arrival_at',
         'claimed_at', 'picked_up_at', 'delivered_at',
+        'proof_path', 'proof_at',
     ];
 
     protected $casts = [
@@ -24,6 +25,7 @@ class Delivery extends Model
         'claimed_at'           => 'datetime',
         'picked_up_at'         => 'datetime',
         'delivered_at'         => 'datetime',
+        'proof_at'             => 'datetime',
         'pickup_lat'           => 'float',
         'pickup_lng'           => 'float',
         'dropoff_lat'          => 'float',

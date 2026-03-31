@@ -4,6 +4,8 @@ use App\Http\Controllers\Auth\RegistrationController;
 use App\Http\Controllers\CartController;
 use App\Http\Controllers\CheckoutController;
 use App\Http\Controllers\DeliveryController;
+use App\Http\Controllers\MeetupController;
+use App\Http\Controllers\MeetupTrackingController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\ArtPostController;
@@ -43,6 +45,10 @@ Route::middleware('auth')->group(function () {
     Route::post('/cart/{artPost}',        [CartController::class, 'add'])->name('cart.add');
     Route::delete('/cart/{artPost}',      [CartController::class, 'remove'])->name('cart.remove');
     Route::get('/cart/{artPost}/status',  [CartController::class, 'status'])->name('cart.status');
+
+    // ── Artist meet-up anchor (shared — callable by buyer checkout) ──
+    Route::get('/api/artist/{artistId}/meetup-location', [ProfileController::class, 'getMeetupLocation'])
+         ->name('artist.meetup-location.get');
 });
 
 // ── Registration (role-split flow) ────────────────────────────────
@@ -65,6 +71,11 @@ Route::middleware(['auth', 'role:admin'])->prefix('admin')->group(function () {
     Route::get('/approvals',               [App\Http\Controllers\AdminController::class, 'approvals'])->name('admin.approvals');
     Route::post('/drivers/{user}/approve', [App\Http\Controllers\AdminController::class, 'approveDriver'])->name('admin.drivers.approve');
     Route::post('/drivers/{user}/reject',  [App\Http\Controllers\AdminController::class, 'rejectDriver'])->name('admin.drivers.reject');
+
+    // ── Orders & live tracking ───────────────────────────────
+    Route::get('/orders',                              [App\Http\Controllers\AdminController::class, 'orders'])->name('admin.orders');
+    Route::get('/orders/{order}/track',                [App\Http\Controllers\AdminController::class, 'adminTrackingView'])->name('admin.orders.track');
+    Route::get('/deliveries/{delivery}/location',      [App\Http\Controllers\AdminController::class, 'adminPollLocation'])->name('admin.delivery.location');
 });
 
 // ── Artist ────────────────────────────────────────────────────────
@@ -86,9 +97,28 @@ Route::middleware(['auth', 'role:artist'])->prefix('artist')->group(function () 
 
     // Order management
     Route::get('/orders',                    [OrderController::class, 'artistIndex'])->name('artist.orders');
-    Route::post('/orders/{order}/accept',    [OrderController::class, 'accept'])->name('artist.orders.accept');
-    Route::post('/orders/{order}/decline',   [OrderController::class, 'decline'])->name('artist.orders.decline');
-    Route::post('/orders/{order}/shipped',   [OrderController::class, 'markShipped'])->name('artist.orders.shipped');
+    Route::post('/orders/{order}/accept',          [OrderController::class, 'accept'])->name('artist.orders.accept');
+    Route::post('/orders/{order}/decline',         [OrderController::class, 'decline'])->name('artist.orders.decline');
+    Route::post('/orders/{order}/shipped',         [OrderController::class, 'markShipped'])->name('artist.orders.shipped');
+    Route::post('/orders/{order}/meetup-proof',    [OrderController::class, 'artistMeetupProof'])->name('artist.orders.meetup-proof');
+
+    // ── Meet-up negotiation ───────────────────────────────────────
+    Route::get('/orders/{order}/meetup',           [MeetupController::class, 'artistReview'])->name('artist.meetup.review');
+    Route::post('/orders/{order}/meetup/approve',  [MeetupController::class, 'approve'])->name('artist.meetup.approve');
+    Route::post('/orders/{order}/meetup/counter',  [MeetupController::class, 'counter'])->name('artist.meetup.counter');
+    Route::post('/orders/{order}/meetup/revert',   [MeetupController::class, 'revert'])->name('artist.meetup.revert');
+
+    // ── Meet-up tracking (artist side) ────────────────────────────
+    Route::post('/orders/{order}/meetup-session/start',    [MeetupTrackingController::class, 'startSession'])->name('artist.meetup.session.start');
+    Route::post('/orders/{order}/meetup-session/consent',  [MeetupTrackingController::class, 'consent'])->name('artist.meetup.session.consent');
+    Route::post('/orders/{order}/meetup-session/location', [MeetupTrackingController::class, 'pushLocation'])->name('artist.meetup.session.location');
+    Route::get('/orders/{order}/meetup-session/poll',      [MeetupTrackingController::class, 'poll'])->name('artist.meetup.session.poll');
+    Route::post('/orders/{order}/meetup-session/stop',     [MeetupTrackingController::class, 'stopSharing'])->name('artist.meetup.session.stop');
+    Route::post('/orders/{order}/meetup-session/end',      [MeetupTrackingController::class, 'endSession'])->name('artist.meetup.session.end');
+
+    // ── Artist meet-up default location ──────────────────────────
+    Route::post('/meetup-location', [ProfileController::class, 'updateMeetupLocation'])->name('artist.meetup-location.update');
+    Route::post('/pickup-location', [ProfileController::class, 'updatePickupLocation'])->name('artist.pickup-location.update');
 
     // ── Dispatch flow ─────────────────────────────────────────────
     Route::get('/orders/{order}/dispatch',          [DeliveryController::class, 'dispatchIndex'])->name('artist.dispatch');
@@ -113,9 +143,23 @@ Route::middleware(['auth', 'role:buyer'])->prefix('buyer')->group(function () {
     Route::get('/cart',           [CartController::class, 'index'])->name('buyer.cart');
     Route::get('/checkout',       [CheckoutController::class, 'show'])->name('buyer.checkout');
     Route::post('/checkout',      [CheckoutController::class, 'store'])->name('buyer.checkout.store');
-    Route::get('/orders',         [OrderController::class, 'buyerIndex'])->name('buyer.orders');
+    Route::get('/orders',                            [OrderController::class, 'buyerIndex'])->name('buyer.orders');
+    Route::post('/orders/{order}/meetup-received', [OrderController::class, 'buyerMeetupReceived'])->name('buyer.orders.meetup-received');
+    Route::post('/orders/{order}/delivery-received', [OrderController::class, 'buyerDeliveryReceived'])->name('buyer.orders.delivery-received');
 
-    // ── Live tracking ─────────────────────────────────────────────
+    // ── Meet-up negotiation (buyer) ────────────────────────────────
+    Route::get('/orders/{order}/meetup',          [MeetupController::class, 'buyerReview'])->name('buyer.meetup.review');
+    Route::post('/orders/{order}/meetup/respond', [MeetupController::class, 'buyerRespond'])->name('buyer.meetup.respond');
+
+    // ── Meet-up tracking (buyer side) ─────────────────────────────
+    Route::post('/orders/{order}/meetup-session/start',    [MeetupTrackingController::class, 'startSession'])->name('buyer.meetup.session.start');
+    Route::post('/orders/{order}/meetup-session/consent',  [MeetupTrackingController::class, 'consent'])->name('buyer.meetup.session.consent');
+    Route::post('/orders/{order}/meetup-session/location', [MeetupTrackingController::class, 'pushLocation'])->name('buyer.meetup.session.location');
+    Route::get('/orders/{order}/meetup-session/poll',      [MeetupTrackingController::class, 'poll'])->name('buyer.meetup.session.poll');
+    Route::post('/orders/{order}/meetup-session/stop',     [MeetupTrackingController::class, 'stopSharing'])->name('buyer.meetup.session.stop');
+    Route::post('/orders/{order}/meetup-session/end',      [MeetupTrackingController::class, 'endSession'])->name('buyer.meetup.session.end');
+
+    // ── Live delivery tracking ─────────────────────────────────────
     Route::get('/orders/{order}/track',           [DeliveryController::class, 'trackingView'])->name('buyer.track');
     Route::get('/deliveries/{delivery}/location', [DeliveryController::class, 'pollLocation'])->name('buyer.delivery.location');
 });

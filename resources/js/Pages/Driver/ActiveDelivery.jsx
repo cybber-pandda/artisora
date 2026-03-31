@@ -6,9 +6,11 @@ import {
     MapPin, Package, Ruler, Weight, Clock, CheckCircle,
     Phone, Navigation, Truck, AlertCircle, User,
     ArrowLeft, ChevronRight, RefreshCw, Shield, Route,
+    Camera, Upload, Loader2, ZoomIn, XCircle,
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryMap from '@/Components/DeliveryMap';
+import ImageLightbox from '@/Components/ImageLightbox';
 import { processGpsTick } from '@/Utils/SnapPipeline';
 
 // ── Status config ─────────────────────────────────────────────────
@@ -73,6 +75,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
     const [sharing, setSharing]   = useState(false);
     const [error, setError]       = useState(null);
     const [location, setLocation] = useState(null);
+    const [rawLocation, setRawLocation] = useState(null); // raw GPS fallback (shown before accurate fix)
 
     // Pipeline state
     const [snapMode, setSnapMode]               = useState('snapped');
@@ -104,6 +107,14 @@ function useLocationService(deliveryId, shouldAutoStart) {
      * Process a single GPS position through the snap pipeline.
      */
     const processPosition = useCallback((position) => {
+        const rawLat = position.coords.latitude;
+        const rawLng = position.coords.longitude;
+        const accuracy = position.coords.accuracy ?? 0;
+
+        // Always capture raw position for immediate blue-dot display
+        setRawLocation({ lat: rawLat, lng: rawLng });
+        setGpsAccuracy(accuracy);
+
         const result = processGpsTick({
             coords: position.coords,
             routeCoords:        routeCoordsRef.current,
@@ -115,8 +126,25 @@ function useLocationService(deliveryId, shouldAutoStart) {
             lastKnownBearing:   lastKnownBearingRef.current,
         });
 
-        // null = fix was dropped by accuracy guard
-        if (!result) return;
+        // null = fix was dropped by accuracy guard (>50m).
+        // Still send raw position to server so buyer sees the driver.
+        if (!result) {
+            const now = Date.now();
+            if (now - lastServerSendRef.current >= SERVER_SEND_INTERVAL_MS) {
+                lastServerSendRef.current = now;
+                axios.post(route('driver.location', deliveryId), {
+                    lat:       rawLat,
+                    lng:       rawLng,
+                    raw_lat:   rawLat,
+                    raw_lng:   rawLng,
+                    snap_mode: 'offroad',
+                    bearing:   position.coords.heading ?? 0,
+                    accuracy,
+                    heading_source: 'gps',
+                }).catch(() => {});
+            }
+            return;
+        }
 
         // ── Update pipeline refs ──
         lastSnappedPointRef.current   = result.lastSnappedPoint;
@@ -136,7 +164,6 @@ function useLocationService(deliveryId, shouldAutoStart) {
         setSnapMode(result.snapMode);
         setActiveBearing(displayBearing);
         setPipelineRouteGeo(result.routeGeometry);
-        setGpsAccuracy(position.coords.accuracy ?? null);
 
         // ── Throttled server send ──
         const now = Date.now();
@@ -149,7 +176,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
                 raw_lng: result.rawPosition[0],
                 snap_mode: result.snapMode,
                 bearing:   displayBearing,
-                accuracy:  position.coords.accuracy ?? 0,
+                accuracy,
                 heading_source: 'gps',
             }).catch(() => {});
         }
@@ -204,7 +231,7 @@ function useLocationService(deliveryId, shouldAutoStart) {
     }, [shouldAutoStart]);
 
     return {
-        sharing, start, stop, error, location,
+        sharing, start, stop, error, location, rawLocation,
         snapMode, activeBearing, pipelineRouteGeo,
         handleRouteReady, gpsAccuracy,
     };
@@ -218,6 +245,12 @@ export default function ActiveDelivery({ delivery, order, artist }) {
     const [transitProcessing, setTransitProcessing] = useState(false);
     const [deliveredProcessing, setDeliveredProcessing] = useState(false);
     const [routeInfo, setRouteInfo] = useState(null);
+
+    // Proof photo state
+    const [proofFile, setProofFile]       = useState(null);
+    const [proofPreview, setProofPreview] = useState(null);
+    const [proofExpanded, setProofExpanded] = useState(false);
+    const proofInputRef = useRef(null);
 
     const isPickedUp  = delivery.status === 'picked_up';
     const isInTransit = delivery.status === 'in_transit';
@@ -243,8 +276,9 @@ export default function ActiveDelivery({ delivery, order, artist }) {
             ? { lat: order.delivery_lat, lng: order.delivery_lng }
             : null;
 
-    // Live driver location from pipeline or from server data
+    // Live driver location: snapped → raw fallback → server DB fallback
     const driverLocation = gps.location
+        ?? gps.rawLocation
         ?? (delivery.driver_lat && delivery.driver_lng
             ? { lat: delivery.driver_lat, lng: delivery.driver_lng }
             : null);
@@ -258,10 +292,27 @@ export default function ActiveDelivery({ delivery, order, artist }) {
     };
 
     const handleMarkDelivered = () => {
+        if (!proofFile) return;
         setDeliveredProcessing(true);
-        router.post(route('driver.delivered', delivery.id), {}, {
+        const fd = new FormData();
+        fd.append('proof', proofFile);
+        router.post(route('driver.delivered', delivery.id), fd, {
+            forceFormData: true,
             onFinish: () => setDeliveredProcessing(false),
         });
+    };
+
+    const handleProofSelect = (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        setProofFile(f);
+        setProofPreview(URL.createObjectURL(f));
+    };
+
+    const handleProofClear = () => {
+        setProofFile(null);
+        setProofPreview(null);
+        if (proofInputRef.current) proofInputRef.current.value = '';
     };
 
     const fmtEta = delivery.estimated_arrival_at
@@ -317,8 +368,8 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                             <CheckCircle size={24} className="text-emerald-600" />
                         </div>
                         <div>
-                            <p className="font-display text-lg font-semibold text-emerald-800">🎉 Delivery Complete!</p>
-                            <p className="text-sm text-emerald-700">Great work. The artwork has been delivered safely.</p>
+                            <p className="font-display text-lg font-semibold text-emerald-800">📸 Proof Uploaded!</p>
+                            <p className="text-sm text-emerald-700">Awaiting buyer confirmation. The order will auto-complete if not confirmed within 3 days.</p>
                         </div>
                     </motion.div>
                 )}
@@ -328,24 +379,26 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                     <StepBar status={delivery.status} />
                 </div>
 
-                {/* ── MAP ──────────────────────────────────────── */}
-                <div className="overflow-hidden rounded-2xl border border-border shadow-sm">
-                    <DeliveryMap
-                        pickup={pickup}
-                        dropoff={dropoff}
-                        driverLocation={driverLocation}
-                        status={delivery.status}
-                        activeBearing={gps.activeBearing}
-                        snapMode={gps.snapMode}
-                        routeGeometry={gps.pipelineRouteGeo}
-                        gpsAccuracy={gps.gpsAccuracy}
-                        pickupLabel={`🎨 ${artist?.name ?? 'Artist'}`}
-                        dropoffLabel={`📦 ${order.buyer_name}`}
-                        className="h-80"
-                        onRouteInfo={setRouteInfo}
-                        onRouteReady={gps.handleRouteReady}
-                    />
-                </div>
+                {/* ── MAP (hidden after proof is uploaded) ────── */}
+                {!isDelivered && (
+                    <div className="overflow-hidden rounded-2xl border border-border shadow-sm">
+                        <DeliveryMap
+                            pickup={pickup}
+                            dropoff={dropoff}
+                            driverLocation={driverLocation}
+                            status={delivery.status}
+                            activeBearing={gps.activeBearing}
+                            snapMode={gps.snapMode}
+                            routeGeometry={gps.pipelineRouteGeo}
+                            gpsAccuracy={gps.gpsAccuracy}
+                            pickupLabel={`🎨 ${artist?.name ?? 'Artist'}`}
+                            dropoffLabel={`📦 ${order.buyer_name}`}
+                            className="h-80"
+                            onRouteInfo={setRouteInfo}
+                            onRouteReady={gps.handleRouteReady}
+                        />
+                    </div>
+                )}
 
                 {/* ── LIVE ROUTE INFO ──────────────────────────── */}
                 {routeInfo && isActive && (
@@ -388,7 +441,11 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                                 </p>
                                 <p className="text-xs text-ink-muted">
                                     {gps.sharing
-                                        ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · 🔵 Live · ${gps.activeBearing.toFixed(0)}° hdg`
+                                        ? (gps.location
+                                            ? `${gps.snapMode === 'snapped' ? '🛣️ On route' : '📍 Off-road'} · 🔵 Live · ${gps.activeBearing.toFixed(0)}° hdg`
+                                            : (gps.rawLocation
+                                                ? `📍 Raw GPS · ±${Math.round(gps.gpsAccuracy ?? 0)}m · Locking in…`
+                                                : 'Waiting for GPS fix…'))
                                         : 'Tap "Share GPS" to let the buyer track your location.'}
                                 </p>
                                 {gps.error && <p className="mt-1 text-xs font-medium text-red-600">{gps.error}</p>}
@@ -453,18 +510,79 @@ export default function ActiveDelivery({ delivery, order, artist }) {
                             <Navigation size={16} className="mt-0.5 flex-shrink-0" />
                             <div>
                                 <p className="font-semibold">Step 2: Deliver to the buyer</p>
-                                <p className="mt-1 text-xs">Your location is being shared with the buyer. Drive safely! When you arrive and hand over the artwork, tap below.</p>
+                                <p className="mt-1 text-xs">Your location is being shared with the buyer. When you arrive and hand over the artwork, upload a proof photo below.</p>
                             </div>
                         </div>
-                        <motion.button
-                            whileTap={{ scale: 0.98 }}
-                            onClick={handleMarkDelivered}
-                            disabled={deliveredProcessing}
-                            className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-4 text-base font-bold text-white shadow-md transition-all hover:bg-emerald-700 hover:shadow-lg disabled:opacity-50"
-                        >
-                            <CheckCircle size={20} />
-                            {deliveredProcessing ? 'Completing…' : '🎉 Mark as Delivered'}
-                        </motion.button>
+
+                        {/* Proof photo upload */}
+                        <input
+                            ref={proofInputRef}
+                            type="file"
+                            accept="image/*"
+                            onChange={handleProofSelect}
+                            className="hidden"
+                        />
+
+                        {proofPreview ? (
+                            <div className="space-y-2">
+                                <div className="relative group">
+                                    <img
+                                        src={proofPreview}
+                                        alt="Proof preview"
+                                        className="h-36 w-full rounded-xl object-cover border border-border cursor-pointer"
+                                        onClick={() => setProofExpanded(true)}
+                                    />
+                                    <div
+                                        className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/0 group-hover:bg-black/30 transition-colors cursor-pointer"
+                                        onClick={() => setProofExpanded(true)}
+                                    >
+                                        <ZoomIn size={20} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleProofClear}
+                                        className="absolute top-2 right-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors"
+                                    >
+                                        <XCircle size={14} />
+                                    </button>
+                                </div>
+                                <p className="text-xs text-ink-muted text-center">Tap the image to expand. Ready to complete delivery?</p>
+
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={handleProofClear}
+                                        className="flex-1 rounded-xl border border-border bg-canvas py-2.5 text-sm font-semibold text-ink-muted hover:bg-stone-50 transition-colors"
+                                    >
+                                        Retake
+                                    </button>
+                                    <motion.button
+                                        whileTap={{ scale: 0.98 }}
+                                        type="button"
+                                        onClick={handleMarkDelivered}
+                                        disabled={deliveredProcessing}
+                                        className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 transition-colors disabled:opacity-60"
+                                    >
+                                        {deliveredProcessing
+                                            ? <><Loader2 size={14} className="animate-spin" /> Uploading…</>
+                                            : <><Upload size={14} /> 🎉 Complete Delivery</>}
+                                    </motion.button>
+                                </div>
+
+                                {/* Lightbox */}
+                                <AnimatePresence>
+                                    {proofExpanded && <ImageLightbox src={proofPreview} alt="Proof preview" onClose={() => setProofExpanded(false)} />}
+                                </AnimatePresence>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => proofInputRef.current?.click()}
+                                className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-emerald-300 bg-emerald-50 py-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-100 transition-colors"
+                            >
+                                <Camera size={15} /> 📸 Upload Proof of Delivery
+                            </button>
+                        )}
                     </motion.div>
                 )}
 

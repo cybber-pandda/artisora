@@ -1,13 +1,125 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import AppLayout from '@/Layouts/AppLayout';
 import { Head, router, usePage, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Package, Clock, CheckCircle, XCircle, Truck,
     ChevronDown, ChevronUp, Phone, Mail, MapPin,
-    CreditCard, Banknote, AlertTriangle, MessageSquare,
+    CreditCard, Banknote, AlertTriangle, MessageSquare, Navigation,
+    Camera, Upload, Star, Loader2, ZoomIn,
 } from 'lucide-react';
+import MeetupTrackingMap from '@/Components/MeetupTrackingMap';
+import PickupTrackingMap from '@/Components/PickupTrackingMap';
+import ImageLightbox, { ExpandableImage } from '@/Components/ImageLightbox';
 
+
+// ── Proof Upload (inline, with preview-before-send) ──────────────
+function ProofUploadInline({ orderId }) {
+    const [file, setFile]       = useState(null);
+    const [preview, setPreview] = useState(null);
+    const [uploading, setUploading] = useState(false);
+    const [expanded, setExpanded]   = useState(false);
+    const inputRef = useRef(null);
+
+    const handleSelect = (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        setFile(f);
+        setPreview(URL.createObjectURL(f));
+    };
+
+    const handleUpload = () => {
+        if (!file) return;
+        setUploading(true);
+        const fd = new FormData();
+        fd.append('proof', file);
+        router.post(route('artist.orders.meetup-proof', orderId), fd, {
+            forceFormData: true,
+            preserveScroll: true,
+            onFinish: () => setUploading(false),
+        });
+    };
+
+    const handleClear = () => {
+        setFile(null);
+        setPreview(null);
+        if (inputRef.current) inputRef.current.value = '';
+    };
+
+    return (
+        <div className="space-y-2">
+            <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleSelect}
+                className="hidden"
+            />
+
+            {preview ? (
+                <>
+                    {/* Preview */}
+                    <div className="relative group">
+                        <img
+                            src={preview}
+                            alt="Proof preview"
+                            className="h-36 w-full rounded-xl object-cover border border-border cursor-pointer"
+                            onClick={() => setExpanded(true)}
+                        />
+                        <div
+                            className="absolute inset-0 flex items-center justify-center rounded-xl bg-black/0 group-hover:bg-black/30 transition-colors cursor-pointer"
+                            onClick={() => setExpanded(true)}
+                        >
+                            <ZoomIn size={20} className="text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow-lg" />
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleClear}
+                            className="absolute top-2 right-2 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors"
+                        >
+                            <XCircle size={14} />
+                        </button>
+                    </div>
+                    <p className="text-xs text-ink-muted text-center">Tap the image to expand. Ready to send?</p>
+
+                    {/* Confirm + Cancel buttons */}
+                    <div className="flex gap-2">
+                        <button
+                            type="button"
+                            onClick={handleClear}
+                            className="flex-1 rounded-xl border border-border bg-canvas py-2.5 text-sm font-semibold text-ink-muted hover:bg-stone-50 transition-colors"
+                        >
+                            Retake
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleUpload}
+                            disabled={uploading}
+                            className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 transition-colors disabled:opacity-60"
+                        >
+                            {uploading
+                                ? <><Loader2 size={14} className="animate-spin" /> Uploading…</>
+                                : <><Upload size={14} /> Send Proof</>}
+                        </button>
+                    </div>
+
+                    {/* Lightbox */}
+                    <AnimatePresence>
+                        {expanded && <ImageLightbox src={preview} alt="Proof preview" onClose={() => setExpanded(false)} />}
+                    </AnimatePresence>
+                </>
+            ) : (
+                <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-emerald-300 bg-emerald-50 py-3 text-sm font-semibold text-emerald-700 hover:bg-emerald-100 transition-colors"
+                >
+                    <Camera size={15} /> 📸 Upload Proof of Hand-off
+                </button>
+            )}
+        </div>
+    );
+}
 
 // ── Status config ────────────────────────────────────────────────
 const STATUS = {
@@ -120,6 +232,9 @@ function OrderCard({ order }) {
     const status = STATUS[order.status] ?? STATUS.pending;
     const StatusIcon = status.icon;
 
+    const [trackingOrderId, setTrackingOrderId] = useState(null);
+    const [pickupTrackingId, setPickupTrackingId] = useState(null);
+
     const accept = () => router.post(route('artist.orders.accept', order.id), {}, {
         preserveScroll: true,
     });
@@ -222,8 +337,29 @@ function OrderCard({ order }) {
                                     <div className="flex items-center gap-2 text-sm text-ink-soft">
                                         <Package size={13} className="text-ink-muted" />
                                         {DELIVERY_LABELS[order.delivery_method]}
-                                        {order.delivery_method === 'meetup' && order.meetup_location && ` · ${order.meetup_location}`}
+                                        {order.delivery_method === 'meetup' && (order.meetup_label || order.meetup_location) && (
+                                            <span className="text-ink-muted"> · {order.meetup_label ?? order.meetup_location}</span>
+                                        )}
                                     </div>
+
+                                    {/* Meetup negotiation badge */}
+                                    {order.delivery_method === 'meetup' && order.meetup_status === 'pending_artist' && (
+                                        <div className="mt-2">
+                                            <Link
+                                                href={route('artist.meetup.review', order.id)}
+                                                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100 transition-colors"
+                                            >
+                                                <MapPin size={12} /> Review Meet-up Location →
+                                            </Link>
+                                        </div>
+                                    )}
+
+                                    {/* Confirmed meetup location chip */}
+                                    {order.delivery_method === 'meetup' && order.meetup_status === 'agreed' && order.meetup_lat && (
+                                        <div className="mt-2 flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
+                                            <CheckCircle size={12} /> Meet-up confirmed: {order.meetup_label}
+                                        </div>
+                                    )}
                                     {order.buyer.address && (
                                         <div className="flex items-start gap-2 text-sm text-ink-soft">
                                             <MapPin size={13} className="mt-0.5 text-ink-muted" /> {order.buyer.address}
@@ -269,13 +405,85 @@ function OrderCard({ order }) {
                                 )}
 
 
-                                {order.status === 'confirmed' && (
+                                {order.status === 'confirmed' && order.delivery_method === 'delivery' && (
                                     <a
                                         href={route('artist.dispatch', order.id)}
                                         className="flex w-full items-center justify-center gap-2 rounded-xl bg-sienna py-3 text-sm font-semibold text-white transition-colors hover:bg-sienna-600"
                                     >
                                         <Truck size={15} /> Dispatch Delivery
                                     </a>
+                                )}
+
+                                {/* ── PICKUP FLOW ─────────────────────── */}
+                                {order.delivery_method === 'pickup' && ['confirmed', 'completed'].includes(order.status) && (
+                                    <div className="space-y-2">
+                                        {/* Pickup tracking map toggle */}
+                                        {order.status === 'confirmed' && order.pickup_lat && (
+                                            pickupTrackingId === order.id ? (
+                                                <PickupTrackingMap
+                                                    order={order}
+                                                    role="artist"
+                                                    onClose={() => setPickupTrackingId(null)}
+                                                />
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setPickupTrackingId(order.id)}
+                                                    className="w-full flex items-center justify-center gap-2 rounded-xl border-2 border-teal-300 bg-teal-50 py-3 text-sm font-semibold text-teal-700 hover:bg-teal-100 transition-colors"
+                                                >
+                                                    <Navigation size={15} /> Monitor Buyer Pick-up 📍
+                                                </button>
+                                            )
+                                        )}
+
+                                        {/* Proof upload (no proof yet) */}
+                                        {order.status === 'confirmed' && !order.meetup_proof_url && (
+                                            <>
+                                                <div className="flex items-center gap-2 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-700">
+                                                    <Package size={15} />
+                                                    <span>Buyer will pick up at your location. Upload proof when they arrive.</span>
+                                                </div>
+                                                <ProofUploadInline orderId={order.id} />
+                                            </>
+                                        )}
+
+                                        {/* Proof uploaded — awaiting buyer */}
+                                        {order.meetup_proof_url && !order.meetup_completed_at && (
+                                            <div className="space-y-2">
+                                                <ExpandableImage
+                                                    src={order.meetup_proof_url}
+                                                    alt="Pickup proof photo"
+                                                    className="h-28 border border-border rounded-xl overflow-hidden"
+                                                />
+                                                <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                                                    <CheckCircle size={15} />
+                                                    <span>Proof sent — awaiting buyer confirmation</span>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Completed: show buyer review */}
+                                        {order.status === 'completed' && (
+                                            <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
+                                                <CheckCircle size={15} />
+                                                ✅ Pickup completed successfully
+                                            </div>
+                                        )}
+
+                                        {order.status === 'completed' && order.review && (
+                                            <div className="rounded-xl border border-border bg-canvas p-3 space-y-1">
+                                                <p className="text-xs font-semibold text-ink-muted">Buyer's review:</p>
+                                                <div className="flex items-center gap-1">
+                                                    {[1,2,3,4,5].map(n => (
+                                                        <Star key={n} size={14} className={n <= order.review.rating ? 'fill-amber-400 text-amber-400' : 'text-stone-300'} />
+                                                    ))}
+                                                </div>
+                                                {order.review.comment && (
+                                                    <p className="text-xs text-ink-muted">"{order.review.comment}"</p>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
                                 )}
 
                                 {order.status === 'shipped' && (
@@ -288,13 +496,115 @@ function OrderCard({ order }) {
                                     </a>
                                 )}
 
-                                {order.status === 'completed' && (
-                                    <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
-                                        <CheckCircle size={15} />
-                                        ✅ Delivery completed successfully
+                                {order.status === 'completed' && order.delivery_method === 'delivery' && (
+                                    <div className="space-y-2">
+                                        <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
+                                            <CheckCircle size={15} />
+                                            ✅ Delivery completed successfully
+                                        </div>
+
+                                        {/* Driver's proof of delivery */}
+                                        {order.delivery_proof_url && (
+                                            <div className="space-y-2">
+                                                <p className="text-xs font-semibold text-ink-muted">Driver's proof of delivery:</p>
+                                                <ExpandableImage
+                                                    src={order.delivery_proof_url}
+                                                    alt="Delivery proof"
+                                                    className="h-28 border border-border rounded-xl overflow-hidden"
+                                                />
+                                            </div>
+                                        )}
+
+                                        {/* Buyer's review */}
+                                        {order.review && (
+                                            <div className="rounded-xl border border-border bg-canvas p-3 space-y-1">
+                                                <p className="text-xs font-semibold text-ink-muted">Buyer's review:</p>
+                                                <div className="flex items-center gap-1">
+                                                    {[1,2,3,4,5].map(n => (
+                                                        <Star key={n} size={14} className={n <= order.review.rating ? 'fill-amber-400 text-amber-400' : 'text-stone-300'} />
+                                                    ))}
+                                                </div>
+                                                {order.review.comment && (
+                                                    <p className="text-xs text-ink-muted">"{order.review.comment}"</p>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
+                                {/* Shipped delivery with proof — awaiting buyer */}
+                                {order.status === 'shipped' && order.delivery_method === 'delivery' && order.delivery_proof_url && (
+                                    <div className="space-y-2">
+                                        <ExpandableImage
+                                            src={order.delivery_proof_url}
+                                            alt="Delivery proof"
+                                            className="h-28 border border-border rounded-xl overflow-hidden"
+                                        />
+                                        <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                                            <CheckCircle size={15} />
+                                            <span>Proof uploaded — awaiting buyer confirmation</span>
+                                        </div>
+                                    </div>
+                                )}
+                                {/* Go to Meet-up tracking button */}
+                                {order.delivery_method === 'meetup'
+                                    && order.meetup_status === 'agreed'
+                                    && order.meetup_lat
+                                    && ['confirmed', 'completed'].includes(order.status) && (
+                                    <div className="space-y-2">
+                                        {trackingOrderId === order.id ? (
+                                            <MeetupTrackingMap
+                                                order={order}
+                                                role="artist"
+                                                onClose={() => setTrackingOrderId(null)}
+                                            />
+                                        ) : (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setTrackingOrderId(order.id)}
+                                                    className="w-full flex items-center justify-center gap-2 rounded-xl border-2 border-violet-300 bg-violet-50 py-3 text-sm font-semibold text-violet-700 hover:bg-violet-100 transition-colors"
+                                                >
+                                                    <Navigation size={15} /> Go to Meet-up 📍
+                                                </button>
+
+                                                {/* Proof upload with preview (artist only, no proof yet) */}
+                                                {order.status === 'confirmed' && !order.meetup_proof_url && (
+                                                    <ProofUploadInline orderId={order.id} />
+                                                )}
+
+                                                {/* Proof uploaded — expandable thumbnail + badge */}
+                                                {order.meetup_proof_url && !order.meetup_completed_at && (
+                                                    <div className="space-y-2">
+                                                        <ExpandableImage
+                                                            src={order.meetup_proof_url}
+                                                            alt="Your proof photo"
+                                                            className="h-28 border border-border rounded-xl overflow-hidden"
+                                                        />
+                                                        <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                                                            <CheckCircle size={15} />
+                                                            <span>Proof sent — awaiting buyer confirmation</span>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Completed: show buyer review */}
+                                                {order.status === 'completed' && order.review && (
+                                                    <div className="rounded-xl border border-border bg-canvas p-3 space-y-1">
+                                                        <div className="flex items-center gap-1">
+                                                            {[1,2,3,4,5].map(n => (
+                                                                <Star key={n} size={14} className={n <= order.review.rating ? 'fill-amber-400 text-amber-400' : 'text-stone-300'} />
+                                                            ))}
+                                                        </div>
+                                                        {order.review.comment && (
+                                                            <p className="text-xs text-ink-muted">"{order.review.comment}"</p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                )}
 
                             </div>
                         </motion.div>

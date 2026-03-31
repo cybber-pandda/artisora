@@ -13,13 +13,13 @@ use Inertia\Response;
 
 class CheckoutController extends Controller
 {
-    // ── Show checkout page ───────────────────────────────────────
+    // ── Show checkout page ─────────────────────────────────────────────
     public function show(): Response|\Illuminate\Http\RedirectResponse
     {
         $user    = Auth::user()->load('buyerProfile');
         $profile = $user->buyerProfile;
 
-        $cartItems = CartItem::with(['artPost.media'])
+        $cartItems = CartItem::with(['artPost.media', 'artPost.user.artistProfile'])
             ->where('user_id', $user->id)
             ->get()
             ->map(fn ($ci) => [
@@ -28,6 +28,7 @@ class CheckoutController extends Controller
                 'price'       => (float) $ci->artPost->price,
                 'thumbnail'   => $ci->artPost->media->where('type', 'image')->first()?->url ?? null,
                 'is_sold'     => $ci->artPost->is_sold,
+                'artist_id'   => $ci->artPost->user_id,
             ]);
 
         // If cart is empty redirect back
@@ -37,10 +38,33 @@ class CheckoutController extends Controller
 
         $subtotal = $cartItems->sum('price');
 
+        // Fetch primary artist's meet-up anchor (single-artist checkout)
+        $primaryArtistId = $cartItems->first()['artist_id'] ?? null;
+        $artistMeetup    = null;
+        $artistPickup    = null;
+        if ($primaryArtistId) {
+            $artistProfile = \App\Models\User::find($primaryArtistId)?->artistProfile;
+            if ($artistProfile?->hasMeetupLocation()) {
+                $artistMeetup = [
+                    'lat'    => $artistProfile->latitude,
+                    'lng'    => $artistProfile->longitude,
+                    'label'  => $artistProfile->meetup_location_label,
+                    'radius' => $artistProfile->meetup_radius_km,
+                ];
+            }
+            if ($artistProfile?->hasPickupLocation()) {
+                $artistPickup = [
+                    'label' => $artistProfile->pickup_location_label,
+                ];
+            }
+        }
+
         return Inertia::render('Buyer/Checkout', [
-            'cartItems' => $cartItems,
-            'subtotal'  => $subtotal,
-            'prefill'   => [
+            'cartItems'    => $cartItems,
+            'subtotal'     => $subtotal,
+            'artistMeetup' => $artistMeetup,
+            'artistPickup' => $artistPickup,
+            'prefill'      => [
                 'full_name'    => $user->name,
                 'email'        => $user->email,
                 'phone_number' => $profile?->phone_number ?? '',
@@ -77,7 +101,13 @@ class CheckoutController extends Controller
 
 
         if ($request->delivery_method === 'meetup') {
-            $rules['meetup_location'] = ['required', 'string', 'max:255'];
+            $rules['meetup_lat']           = ['nullable', 'numeric', 'between:-90,90'];
+            $rules['meetup_lng']           = ['nullable', 'numeric', 'between:-180,180'];
+            $rules['meetup_label']         = ['required', 'string', 'max:255'];
+            $rules['meetup_note']          = ['nullable', 'string', 'max:500'];
+            $rules['used_artist_default']  = ['nullable', 'boolean'];
+            // Legacy: keep meetup_location for backward compat display
+            $rules['meetup_location']      = ['nullable', 'string', 'max:255'];
         }
 
         // GCash number required if paying via GCash
@@ -120,7 +150,23 @@ class CheckoutController extends Controller
                 'postal_code'     => $validated['postal_code'] ?? null,
                 'delivery_lat'    => $validated['delivery_lat'] ?? null,
                 'delivery_lng'    => $validated['delivery_lng'] ?? null,
-                'meetup_location' => $validated['meetup_location'] ?? null,
+                'meetup_location'  => $validated['meetup_label']   ?? $validated['meetup_location'] ?? null,
+                'meetup_lat'       => $validated['meetup_lat']       ?? null,
+                'meetup_lng'       => $validated['meetup_lng']       ?? null,
+                'meetup_label'     => $validated['meetup_label']     ?? null,
+                'meetup_note'      => $validated['meetup_note']      ?? null,
+                // Determine negotiation status at order creation time
+                'meetup_status'    => ($validated['used_artist_default'] ?? true)
+                    ? 'agreed'
+                    : 'pending_artist',
+                'meetup_expires_at'=> ($validated['used_artist_default'] ?? true)
+                    ? null
+                    : now()->addHours(24),
+                'meetup_proposed_lat'   => ($validated['used_artist_default'] ?? true) ? null : ($validated['meetup_lat']   ?? null),
+                'meetup_proposed_lng'   => ($validated['used_artist_default'] ?? true) ? null : ($validated['meetup_lng']   ?? null),
+                'meetup_proposed_label' => ($validated['used_artist_default'] ?? true) ? null : ($validated['meetup_label'] ?? null),
+                'meetup_proposal_by'    => ($validated['used_artist_default'] ?? true) ? null : 'buyer',
+                'meetup_proposed_at'    => ($validated['used_artist_default'] ?? true) ? null : now(),
                 'notes'           => $validated['notes'] ?? null,
                 'payment_method'  => $validated['payment_method'],
                 'gcash_number'    => $validated['gcash_number'] ?? null,

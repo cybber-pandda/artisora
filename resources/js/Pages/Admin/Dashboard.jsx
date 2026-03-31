@@ -1,14 +1,15 @@
 import AppLayout from '@/Layouts/AppLayout';
 import { Link } from '@inertiajs/react';
-import { Users, Package, ShieldCheck, TrendingUp, ArrowRight } from 'lucide-react';
+import { Users, Package, ShieldCheck, TrendingUp, ArrowRight, Truck } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 export default function Dashboard({ stats }) {
     const cards = [
-        { label: 'Total Users',     value: stats?.totalUsers     ?? 0, icon: Users,       color: 'text-sky-400',     bg: 'bg-sky-500/10' },
-        { label: 'Pending Drivers', value: stats?.pendingDrivers ?? 0, icon: ShieldCheck,  color: 'text-amber-400',   bg: 'bg-amber-500/10', href: '/admin/approvals' },
-        { label: 'Active Listings', value: stats?.activeListings ?? 0, icon: TrendingUp,   color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-        { label: 'Orders Today',    value: stats?.ordersToday    ?? 0, icon: Package,      color: 'text-violet-400',  bg: 'bg-violet-500/10' },
+        { label: 'Total Users',       value: stats?.totalUsers       ?? 0, icon: Users,       color: 'text-sky-400',     bg: 'bg-sky-500/10' },
+        { label: 'Pending Drivers',   value: stats?.pendingDrivers   ?? 0, icon: ShieldCheck,  color: 'text-amber-400',   bg: 'bg-amber-500/10',   href: '/admin/approvals' },
+        { label: 'Active Listings',   value: stats?.activeListings   ?? 0, icon: TrendingUp,   color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
+        { label: 'Orders Today',      value: stats?.ordersToday      ?? 0, icon: Package,      color: 'text-violet-400',  bg: 'bg-violet-500/10',  href: '/admin/orders' },
+        { label: 'Active Deliveries', value: stats?.activeDeliveries ?? 0, icon: Truck,        color: 'text-blue-400',    bg: 'bg-blue-500/10',    href: '/admin/orders' },
     ];
 
     return (

@@ -8,6 +8,7 @@ import {
     CheckCircle, Phone, Mail, User, FileText,
 } from 'lucide-react';
 import AddressMapPicker from '@/Components/AddressMapPicker';
+import MeetupMapPicker from '@/Components/MeetupMapPicker';
 
 
 // ── Section wrapper ──────────────────────────────────────────────
@@ -120,22 +121,28 @@ function OrderSummary({ cartItems, subtotal, deliveryMethod }) {
 }
 
 // ── Main Checkout Page ───────────────────────────────────────────
-export default function Checkout({ cartItems, subtotal, prefill }) {
+export default function Checkout({ cartItems, subtotal, prefill, artistMeetup, artistPickup }) {
     const { data, setData, post, processing, errors } = useForm({
-        full_name:       prefill.full_name       ?? '',
-        email:           prefill.email           ?? '',
-        phone_number:    prefill.phone_number    ?? '',
-        delivery_method: 'delivery',
-        address_line:    prefill.address_line    ?? '',
-        city:            prefill.city            ?? '',
-        province:        prefill.province        ?? '',
-        postal_code:     prefill.postal_code     ?? '',
-        delivery_lat:    '',
-        delivery_lng:    '',
-        meetup_location: '',
-        notes:           '',
-        payment_method:  'cod',
-        gcash_number:    prefill.gcash_number    ?? '',
+        full_name:            prefill.full_name       ?? '',
+        email:                prefill.email           ?? '',
+        phone_number:         prefill.phone_number    ?? '',
+        delivery_method:      'delivery',
+        address_line:         prefill.address_line    ?? '',
+        city:                 prefill.city            ?? '',
+        province:             prefill.province        ?? '',
+        postal_code:          prefill.postal_code     ?? '',
+        delivery_lat:         '',
+        delivery_lng:         '',
+        // Meetup fields
+        meetup_lat:           artistMeetup?.lat ?? '',
+        meetup_lng:           artistMeetup?.lng ?? '',
+        meetup_label:         artistMeetup?.label ?? '',
+        meetup_note:          '',
+        used_artist_default:  true,
+        meetup_location:      artistMeetup?.label ?? '',
+        notes:                '',
+        payment_method:       'cod',
+        gcash_number:         prefill.gcash_number    ?? '',
     });
 
 
@@ -146,6 +153,7 @@ export default function Checkout({ cartItems, subtotal, prefill }) {
 
     const isDelivery = data.delivery_method === 'delivery';
     const isMeetup   = data.delivery_method === 'meetup';
+    const isPickup   = data.delivery_method === 'pickup';
     const isGcash    = data.payment_method  === 'gcash';
 
     return (
@@ -312,7 +320,7 @@ export default function Checkout({ cartItems, subtotal, prefill }) {
                                     )}
                                 </AnimatePresence>
 
-                                {/* Meetup location field */}
+                                {/* Meetup location map */}
                                 <AnimatePresence>
                                     {isMeetup && (
                                         <motion.div
@@ -321,16 +329,61 @@ export default function Checkout({ cartItems, subtotal, prefill }) {
                                             exit={{ opacity: 0, height: 0 }}
                                             className="overflow-hidden"
                                         >
-                                            <div className="mt-4">
-                                                <Field label="Preferred Meet-up Location" error={errors.meetup_location} required>
-                                                    <input
-                                                        type="text"
-                                                        value={data.meetup_location}
-                                                        onChange={e => setData('meetup_location', e.target.value)}
-                                                        placeholder="e.g. SM Mall of Asia, Pasay City"
-                                                        className={inputCls}
-                                                    />
-                                                </Field>
+                                            <div className="mt-4 rounded-xl border border-border bg-canvas/60 p-4 space-y-3">
+                                                <div className="flex items-center gap-2">
+                                                    <MapPin size={14} className="text-violet-500" />
+                                                    <p className="text-xs font-semibold uppercase tracking-widest text-ink-muted">Meet-up Location</p>
+                                                </div>
+                                                <MeetupMapPicker
+                                                    artistAnchor={artistMeetup}
+                                                    onChange={({ lat, lng, label, note, usedArtistDefault }) => {
+                                                        setData(prev => ({
+                                                            ...prev,
+                                                            meetup_lat:          lat ?? '',
+                                                            meetup_lng:          lng ?? '',
+                                                            meetup_label:        label ?? '',
+                                                            meetup_note:         note ?? '',
+                                                            used_artist_default: usedArtistDefault,
+                                                            meetup_location:     label ?? '',
+                                                        }));
+                                                    }}
+                                                />
+                                                {errors.meetup_label && (
+                                                    <p className="flex items-center gap-1 text-xs text-red-500">
+                                                        <AlertCircle size={11} /> {errors.meetup_label}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+
+                                {/* Pickup location info */}
+                                <AnimatePresence>
+                                    {isPickup && (
+                                        <motion.div
+                                            initial={{ opacity: 0, height: 0 }}
+                                            animate={{ opacity: 1, height: 'auto' }}
+                                            exit={{ opacity: 0, height: 0 }}
+                                            className="overflow-hidden"
+                                        >
+                                            <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50 p-4 space-y-2">
+                                                <div className="flex items-center gap-2">
+                                                    <Store size={14} className="text-teal-600" />
+                                                    <p className="text-xs font-semibold uppercase tracking-widest text-teal-700">Pick-up Location</p>
+                                                </div>
+                                                {artistPickup?.label ? (
+                                                    <p className="text-sm font-medium text-teal-800">
+                                                        📍 {artistPickup.label}
+                                                    </p>
+                                                ) : (
+                                                    <p className="text-sm text-teal-700">
+                                                        The artist will share their pickup address after confirming your order.
+                                                    </p>
+                                                )}
+                                                <p className="text-xs text-teal-600">
+                                                    You'll go directly to the artist's location to collect your artwork. No delivery fee applies.
+                                                </p>
                                             </div>
                                         </motion.div>
                                     )}

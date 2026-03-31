@@ -69,11 +69,17 @@ jobs:
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           port: 21
+          # Hostinger (shared hosting) requires explicit FTPS (TLS).
+          # Plain FTP causes an immediate FIN / connection-reset from the server.
+          protocol: ftps
+          # Allow self-signed / mis-matched certs common on shared hosts.
+          security: loose
+          # Keep connections low to avoid hitting shared-host limits.
+          connections: 1
+          # Raise timeout (ms) – large repos can stall on slow shared servers.
+          timeout: 60000
           local-dir: ./
           server-dir: /home/u205309581/domains/tantuco-ctc.store/public_html/artisora/
-          # Dangerous-clean-slate defaults to false; the action stores a sync
-          # state file on the server (.ftp-deploy-sync-state.json) so only
-          # CHANGED files are uploaded on subsequent runs.
           log-level: standard
           exclude: |
             **/.git*
