@@ -196,14 +196,26 @@ function useLocationService(deliveryId, shouldAutoStart) {
         recentRawPositionsRef.current = [];
         prevSnapModeRef.current       = 'snapped';
 
-        // Use watchPosition for continuous GPS ticks
+        // Use watchPosition for continuous GPS ticks.
+        // On mobile, GPS cold-starts can take 20-30s — use a longer timeout
+        // and allow slightly stale positions (5s) so the watch doesn't error
+        // out before the device gets a proper fix.
         watchIdRef.current = navigator.geolocation.watchPosition(
             (position) => processPosition(position),
-            () => setError('Could not get GPS fix. Please enable location services.'),
+            (err) => {
+                // TIMEOUT errors (code 3) are common on mobile cold-start; retry silently.
+                // PERMISSION_DENIED (code 1) shows a message.
+                if (err.code === 1) {
+                    setError('Location permission denied. Please allow location access in your browser settings, then tap "Share GPS" again.');
+                } else if (err.code === 2) {
+                    setError('GPS signal unavailable. Move to an open area and try again.');
+                }
+                // code 3 = TIMEOUT — don't show error, watchPosition will keep trying
+            },
             {
                 enableHighAccuracy: true,
-                timeout: 15000,
-                maximumAge: 0,
+                timeout: 30000,   // 30s — mobile GPS needs time to warm up
+                maximumAge: 5000, // allow 5s stale fix while waiting for fresh
             }
         );
     }, [processPosition]);

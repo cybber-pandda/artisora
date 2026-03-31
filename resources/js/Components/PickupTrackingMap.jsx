@@ -93,19 +93,10 @@ export default function PickupTrackingMap({ order, role, onClose }) {
     const [starting, setStarting] = useState(false);
     const [error,    setError]    = useState(null);
     const [locationBlocked, setLocationBlocked] = useState(false);
-
-    /* ── Check geolocation permission on mount ───────────────── */
-    useEffect(() => {
-        if (navigator.permissions) {
-            navigator.permissions.query({ name: 'geolocation' }).then(result => {
-                if (result.state === 'denied') setLocationBlocked(true);
-                result.onchange = () => {
-                    setLocationBlocked(result.state === 'denied');
-                    if (result.state === 'denied') setError('Location access is blocked. Please enable it in your browser settings.');
-                };
-            }).catch(() => {});
-        }
-    }, []);
+    // Note: We do NOT use navigator.permissions.query() on mount because it
+    // incorrectly returns 'denied' on Android Chrome even when permission is
+    // granted at the OS/browser level. locationBlocked is only set when the
+    // actual getCurrentPosition() call fails.
 
     const shopLat = order.pickup_lat;
     const shopLng = order.pickup_lng;
@@ -420,11 +411,11 @@ export default function PickupTrackingMap({ order, role, onClose }) {
                         </div>
                     )}
                     {locationBlocked && (
-                        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
                             <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
                             <div>
-                                <p className="font-semibold">Location access is blocked</p>
-                                <p>Please enable location access in your browser settings, then reload this page.</p>
+                                <p className="font-semibold">Location access was denied</p>
+                                <p>Go to your browser site settings, allow location for this site, then try again.</p>
                             </div>
                         </div>
                     )}
@@ -433,7 +424,7 @@ export default function PickupTrackingMap({ order, role, onClose }) {
                             className="flex-1 rounded-xl border border-border bg-canvas py-2.5 text-sm font-semibold text-ink-muted hover:bg-stone-50 transition-colors">
                             Skip
                         </button>
-                        <button type="button" onClick={startTracking} disabled={starting || locationBlocked}
+                        <button type="button" onClick={startTracking} disabled={starting}
                             className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white hover:bg-teal-700 transition-colors disabled:opacity-60">
                             {starting ? <Loader2 size={14} className="animate-spin" /> : <Navigation size={14} />}
                             {starting ? 'Starting…' : role === 'buyer' ? 'Share My Location' : 'Start Monitoring'}
