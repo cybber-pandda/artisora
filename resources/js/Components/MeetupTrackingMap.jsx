@@ -100,6 +100,20 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
     const [otherDist,   setOtherDist] = useState(null);
     const [starting,    setStarting]  = useState(false);
     const [error,       setError]     = useState(null);
+    const [locationBlocked, setLocationBlocked] = useState(false);
+
+    /* ── Check geolocation permission on mount ───────────────── */
+    useEffect(() => {
+        if (navigator.permissions) {
+            navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                if (result.state === 'denied') setLocationBlocked(true);
+                result.onchange = () => {
+                    setLocationBlocked(result.state === 'denied');
+                    if (result.state === 'denied') setError('Location access is blocked. Please enable it in your browser settings.');
+                };
+            }).catch(() => {});
+        }
+    }, []);
 
     const meetLat = order.meetup_lat;
     const meetLng = order.meetup_lng;
@@ -221,26 +235,45 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
 
     /* ── GPS watch ───────────────────────────────────────────── */
     const startGPS = useCallback(() => {
-        if (!navigator.geolocation) { setError('Geolocation is not supported by this browser.'); return; }
-        watchRef.current = navigator.geolocation.watchPosition(
-            (pos) => {
-                const { latitude: lat, longitude: lng } = pos.coords;
-                setMyPos({ lat, lng });
-                fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/location`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    },
-                    body: JSON.stringify({ lat, lng }),
-                })
-                .then(r => r.json())
-                .then(d => { if (d.session?.status === 'ended') handleSessionEnded(); })
-                .catch(() => {});
-            },
-            () => setError('Location access denied. Please allow location access in your browser.'),
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
+        if (!navigator.geolocation) { setError('Geolocation is not supported by this browser.'); return Promise.reject('no_geolocation'); }
+        return new Promise((resolve, reject) => {
+            // First call getCurrentPosition to trigger the browser permission prompt immediately
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude: lat, longitude: lng } = pos.coords;
+                    setMyPos({ lat, lng });
+                    setLocationBlocked(false);
+                    // Now start continuous watching
+                    watchRef.current = navigator.geolocation.watchPosition(
+                        (pos) => {
+                            const { latitude: lat, longitude: lng } = pos.coords;
+                            setMyPos({ lat, lng });
+                            fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/location`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                },
+                                body: JSON.stringify({ lat, lng }),
+                            })
+                            .then(r => r.json())
+                            .then(d => { if (d.session?.status === 'ended') handleSessionEnded(); })
+                            .catch(() => {});
+                        },
+                        () => {},
+                        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                    );
+                    resolve();
+                },
+                (err) => {
+                    setLocationBlocked(true);
+                    setError('Location access denied. Please allow location access in your browser settings and try again.');
+                    reject(err);
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            );
+        });
     }, [order.id, role]);
 
     /* ── Poll other party's location ─────────────────────────── */
@@ -249,7 +282,7 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
             fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/poll`, {
                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
             })
-            .then(r => r.json())
+            .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
             .then(d => {
                 const s = d.session;
                 if (!s || s.status === 'ended') { handleSessionEnded(); return; }
@@ -269,25 +302,36 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
         setStarting(true);
         setError(null);
         try {
-            await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/start`, {
+            // Start GPS FIRST so the browser permission prompt appears immediately
+            await startGPS();
+
+            // Then register with the server
+            const csrfToken = document.head.querySelector('meta[name="csrf-token"]')?.content;
+            const commonHeaders = {
+                'X-CSRF-TOKEN': csrfToken,
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            };
+
+            const startRes = await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/start`, {
                 method: 'POST',
-                headers: {
-                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    'Accept': 'application/json',
-                },
+                headers: commonHeaders,
             });
-            await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/consent`, {
+            if (!startRes.ok) throw new Error(`Server error ${startRes.status}`);
+
+            const consentRes = await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/consent`, {
                 method: 'POST',
-                headers: {
-                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    'Accept': 'application/json',
-                },
+                headers: commonHeaders,
             });
+            if (!consentRes.ok) throw new Error(`Server error ${consentRes.status}`);
+
             setPhase('active');
-            startGPS();
             startPolling();
-        } catch {
-            setError('Failed to start tracking session. Please try again.');
+        } catch (err) {
+            // If GPS was denied, the error is already set by startGPS
+            if (!error) {
+                setError('Failed to start tracking session. Please try again.');
+            }
         } finally {
             setStarting(false);
         }
@@ -306,6 +350,7 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
                 headers: {
                     'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
                     'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
                 },
             });
         } catch {}
@@ -404,12 +449,21 @@ export default function MeetupTrackingMap({ order, role, onClose }) {
                             {error}
                         </div>
                     )}
+                    {locationBlocked && (
+                        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+                            <div>
+                                <p className="font-semibold">Location access is blocked</p>
+                                <p>Please enable location access in your browser settings, then reload this page.</p>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex gap-2">
                         <button type="button" onClick={declineTracking}
                             className="flex-1 rounded-xl border border-border bg-canvas py-2.5 text-sm font-semibold text-ink-muted hover:bg-stone-50 transition-colors">
                             Decline
                         </button>
-                        <button type="button" onClick={startTracking} disabled={starting}
+                        <button type="button" onClick={startTracking} disabled={starting || locationBlocked}
                             className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 transition-colors disabled:opacity-60">
                             {starting ? <Loader2 size={14} className="animate-spin" /> : <MapPin size={14} />}
                             {starting ? 'Starting…' : 'Share My Location'}

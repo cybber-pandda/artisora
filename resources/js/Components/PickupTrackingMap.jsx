@@ -92,6 +92,20 @@ export default function PickupTrackingMap({ order, role, onClose }) {
     const [distance, setDistance] = useState(null);
     const [starting, setStarting] = useState(false);
     const [error,    setError]    = useState(null);
+    const [locationBlocked, setLocationBlocked] = useState(false);
+
+    /* ── Check geolocation permission on mount ───────────────── */
+    useEffect(() => {
+        if (navigator.permissions) {
+            navigator.permissions.query({ name: 'geolocation' }).then(result => {
+                if (result.state === 'denied') setLocationBlocked(true);
+                result.onchange = () => {
+                    setLocationBlocked(result.state === 'denied');
+                    if (result.state === 'denied') setError('Location access is blocked. Please enable it in your browser settings.');
+                };
+            }).catch(() => {});
+        }
+    }, []);
 
     const shopLat = order.pickup_lat;
     const shopLng = order.pickup_lng;
@@ -182,24 +196,43 @@ export default function PickupTrackingMap({ order, role, onClose }) {
 
     /* ── GPS watch (only buyer tracks GPS) ───────────────────── */
     const startGPS = useCallback(() => {
-        if (!navigator.geolocation) { setError('Geolocation is not supported.'); return; }
-        watchRef.current = navigator.geolocation.watchPosition(
-            (pos) => {
-                const { latitude: lat, longitude: lng } = pos.coords;
-                setBuyerPos({ lat, lng });
-                // Push location to server so artist can see
-                fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/location`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    },
-                    body: JSON.stringify({ lat, lng }),
-                }).catch(() => {});
-            },
-            () => setError('Location access denied. Please allow location in your browser.'),
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
+        if (!navigator.geolocation) { setError('Geolocation is not supported.'); return Promise.reject('no_geolocation'); }
+        return new Promise((resolve, reject) => {
+            // First call getCurrentPosition to trigger the browser permission prompt immediately
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude: lat, longitude: lng } = pos.coords;
+                    setBuyerPos({ lat, lng });
+                    setLocationBlocked(false);
+                    // Now start continuous watching
+                    watchRef.current = navigator.geolocation.watchPosition(
+                        (pos) => {
+                            const { latitude: lat, longitude: lng } = pos.coords;
+                            setBuyerPos({ lat, lng });
+                            // Push location to server so artist can see
+                            fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/location`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                },
+                                body: JSON.stringify({ lat, lng }),
+                            }).catch(() => {});
+                        },
+                        () => {},
+                        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                    );
+                    resolve();
+                },
+                (err) => {
+                    setLocationBlocked(true);
+                    setError('Location access denied. Please allow location in your browser settings and try again.');
+                    reject(err);
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            );
+        });
     }, [order.id, role]);
 
     /* ── Poll buyer's location (artist polls) ────────────────── */
@@ -208,7 +241,7 @@ export default function PickupTrackingMap({ order, role, onClose }) {
             fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/poll`, {
                 headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
             })
-            .then(r => r.json())
+            .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
             .then(d => {
                 const s = d.session;
                 if (!s) return;
@@ -226,27 +259,38 @@ export default function PickupTrackingMap({ order, role, onClose }) {
         setStarting(true);
         setError(null);
         try {
-            await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/start`, {
-                method: 'POST',
-                headers: {
-                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    'Accept': 'application/json',
-                },
-            });
-            await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/consent`, {
-                method: 'POST',
-                headers: {
-                    'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
-                    'Accept': 'application/json',
-                },
-            });
-            setPhase('active');
+            // Start GPS FIRST so the browser permission prompt appears immediately
             if (role === 'buyer') {
-                startGPS();
+                await startGPS();
             }
+
+            // Then register with the server
+            const csrfToken = document.head.querySelector('meta[name="csrf-token"]')?.content;
+            const commonHeaders = {
+                'X-CSRF-TOKEN': csrfToken,
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            };
+
+            const startRes = await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/start`, {
+                method: 'POST',
+                headers: commonHeaders,
+            });
+            if (!startRes.ok) throw new Error(`Server error ${startRes.status}`);
+
+            const consentRes = await fetch(`/${role === 'buyer' ? 'buyer' : 'artist'}/orders/${order.id}/meetup-session/consent`, {
+                method: 'POST',
+                headers: commonHeaders,
+            });
+            if (!consentRes.ok) throw new Error(`Server error ${consentRes.status}`);
+
+            setPhase('active');
             startPolling();
-        } catch {
-            setError('Failed to start tracking. Please try again.');
+        } catch (err) {
+            // If GPS was denied, the error is already set by startGPS
+            if (!error) {
+                setError('Failed to start tracking. Please try again.');
+            }
         } finally {
             setStarting(false);
         }
@@ -260,6 +304,7 @@ export default function PickupTrackingMap({ order, role, onClose }) {
                 headers: {
                     'X-CSRF-TOKEN': document.head.querySelector('meta[name="csrf-token"]')?.content,
                     'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
                 },
             });
         } catch {}
@@ -374,12 +419,21 @@ export default function PickupTrackingMap({ order, role, onClose }) {
                             {error}
                         </div>
                     )}
+                    {locationBlocked && (
+                        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                            <AlertTriangle size={13} className="mt-0.5 flex-shrink-0" />
+                            <div>
+                                <p className="font-semibold">Location access is blocked</p>
+                                <p>Please enable location access in your browser settings, then reload this page.</p>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex gap-2">
                         <button type="button" onClick={() => setPhase('ended')}
                             className="flex-1 rounded-xl border border-border bg-canvas py-2.5 text-sm font-semibold text-ink-muted hover:bg-stone-50 transition-colors">
                             Skip
                         </button>
-                        <button type="button" onClick={startTracking} disabled={starting}
+                        <button type="button" onClick={startTracking} disabled={starting || locationBlocked}
                             className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-teal-600 py-2.5 text-sm font-semibold text-white hover:bg-teal-700 transition-colors disabled:opacity-60">
                             {starting ? <Loader2 size={14} className="animate-spin" /> : <Navigation size={14} />}
                             {starting ? 'Starting…' : role === 'buyer' ? 'Share My Location' : 'Start Monitoring'}
