@@ -3,7 +3,7 @@ import AppLayout from '@/Layouts/AppLayout';
 import { Head, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ToastProvider, useToast } from '@/Components/Toast';
-import PaintingARLauncher from '@/Components/PaintingARView';
+import PaintingARView from '@/Components/PaintingARView';
 import ARQRModal from '@/Components/ARQRModal';
 import {
     ArrowLeft, Heart, ShoppingCart, Eye, X,
@@ -566,10 +566,12 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
             </div>
         </AppLayout>
 
-        {/* ── AR Launcher (tiny, in-viewport, loading=eager) ───── */}
+        {/* ── AR Launcher (hidden, loads GLB eagerly) ────────── */}
         {hasARData && (
-            <PaintingARLauncher
+            <PaintingARView
                 arModelUrl={arModelUrl}
+                widthCm={product.physical_width_cm}
+                heightCm={product.physical_height_cm}
                 productTitle={product.title}
                 onReady={handleARReady}
             />
