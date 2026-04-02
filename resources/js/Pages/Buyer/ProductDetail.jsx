@@ -3,10 +3,12 @@ import AppLayout from '@/Layouts/AppLayout';
 import { Head, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ToastProvider, useToast } from '@/Components/Toast';
+import PaintingARView from '@/Components/PaintingARView';
+import ARQRModal from '@/Components/ARQRModal';
 import {
     ArrowLeft, Heart, ShoppingCart, Eye, X,
     Brush, Ruler, Maximize2, ChevronLeft, ChevronRight,
-    User, ExternalLink, Image as ImageIcon, Loader2, CheckCircle,
+    User, ExternalLink, Image as ImageIcon, Loader2, CheckCircle, ScanLine,
 } from 'lucide-react';
 
 // ── Seed-based hue for consistent gradients ────────────────────────
@@ -215,10 +217,27 @@ export default function ProductDetail({ product, moreFromArtist, inCart: initial
 }
 
 function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
-    const [wishlisted, setWishlisted] = useState(false);
-    const [inCart, setInCart]         = useState(initialInCart);
+    const [wishlisted, setWishlisted]   = useState(false);
+    const [inCart, setInCart]           = useState(initialInCart);
     const [cartLoading, setCartLoading] = useState(false);
-    const addToast                    = useToast();
+    const [arModalOpen, setArModalOpen] = useState(false);
+    const [showARPanel, setShowARPanel] = useState(false);
+    const addToast                      = useToast();
+
+    // Mobile detection — AR can activate natively on mobile
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        typeof navigator !== 'undefined' ? navigator.userAgent : ''
+    );
+
+    const hasARData = product.physical_width_cm && product.physical_height_cm && product.ar_image_url;
+
+    const handleARClick = () => {
+        if (isMobile) {
+            setShowARPanel(true);
+        } else {
+            setArModalOpen(true);
+        }
+    };
 
     const handleCartToggle = async () => {
         if (cartLoading) return;
@@ -253,6 +272,7 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
     };
 
     return (
+        <>
         <AppLayout title={product.title}>
             <Head title={`${product.title} — Artisora`} />
 
@@ -274,9 +294,29 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
                 {/* ── Main content grid ────────────────────────── */}
                 <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
 
-                    {/* Left: Gallery */}
-                    <div>
+                    {/* Left: Gallery + AR Panel */}
+                    <div className="space-y-4">
                         <ImageGallery media={product.media} />
+
+                        {/* AR viewer panel — revealed on mobile after button click */}
+                        <AnimatePresence>
+                            {showARPanel && hasARData && (
+                                <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    exit={{ opacity: 0, height: 0 }}
+                                    transition={{ duration: 0.35 }}
+                                    className="overflow-hidden"
+                                >
+                                    <PaintingARView
+                                        arImageUrl={product.ar_image_url}
+                                        widthCm={product.physical_width_cm}
+                                        heightCm={product.physical_height_cm}
+                                        productTitle={product.title}
+                                    />
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
                     </div>
 
                     {/* Right: Product info */}
@@ -373,6 +413,21 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
                                     </>
                                 )}
                             </div>
+
+                            {/* ── AR Button ── */}
+                            {hasARData && (
+                                <button
+                                    id="view-on-wall-btn"
+                                    onClick={handleARClick}
+                                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-sienna/30 bg-sienna/5 py-3 text-sm font-bold text-sienna transition-all hover:border-sienna/60 hover:bg-sienna/10 active:scale-[0.98]"
+                                >
+                                    <ScanLine size={16} />
+                                    View on Your Wall
+                                    <span className="ml-1 rounded-full bg-sienna/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sienna">
+                                        AR
+                                    </span>
+                                </button>
+                            )}
                         </div>
 
                         {/* Details grid */}
@@ -519,5 +574,14 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
                 )}
             </div>
         </AppLayout>
+
+        {/* ── Desktop QR Modal ──────────────────────────────────── */}
+        <ARQRModal
+            open={arModalOpen}
+            onClose={() => setArModalOpen(false)}
+            url={typeof window !== 'undefined' ? window.location.href : ''}
+            productTitle={product.title}
+        />
+        </>
     );
 }

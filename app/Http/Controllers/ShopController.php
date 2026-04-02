@@ -156,9 +156,10 @@ class ShopController extends Controller
             'comments_count' => $artPost->comments_count,
             'created_at'     => $artPost->created_at->toDateString(),
             'media'          => $artPost->media->map(fn ($m) => [
-                'id'   => $m->id,
-                'url'  => $m->url,
-                'type' => $m->type,
+                'id'           => $m->id,
+                'url'          => $m->url,
+                'type'         => $m->type,
+                'is_ar_primary' => $m->is_ar_primary,
             ]),
             'artist' => [
                 'id'           => $artPost->user->id,
@@ -167,6 +168,10 @@ class ShopController extends Controller
                 'specialty'    => $artPost->user->artistProfile?->specialty,
                 'bio'          => $artPost->user->artistProfile?->bio,
             ],
+            // ── AR fields ──
+            'physical_width_cm'  => $artPost->physical_width_cm  ? (float) $artPost->physical_width_cm  : null,
+            'physical_height_cm' => $artPost->physical_height_cm ? (float) $artPost->physical_height_cm : null,
+            'ar_image_url'       => $artPost->ar_image_url,
         ];
 
         return Inertia::render('Buyer/ProductDetail', [

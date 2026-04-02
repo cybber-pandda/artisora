@@ -4,7 +4,7 @@ import { Head, useForm, Link, router } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Upload, X, Image, Video, Tag, DollarSign,
-    Ruler, Brush, ArrowLeft, Save, AlertCircle, FileText, CheckCircle, Star, Weight,
+    Ruler, Brush, ArrowLeft, Save, FileText, Star, Weight, ScanLine,
 } from 'lucide-react';
 
 import InputError from '@/Components/InputError';
@@ -17,49 +17,86 @@ const MEDIUMS = [
 ];
 
 export default function EditListing({ listing }) {
-    const coverRef = useRef();
+    const coverRef   = useRef();
     const galleryRef = useRef();
 
     // Cover image state
     const [coverPreview, setCoverPreview] = useState(listing.cover_image_url || null);
-    const [coverChanged, setCoverChanged] = useState(false);
 
     // Gallery media state
     const [existingMedia, setExistingMedia] = useState(listing.media || []);
-    const [newPreviews, setNewPreviews] = useState([]);
+    const [newPreviews,   setNewPreviews]   = useState([]);
     const [removeMediaIds, setRemoveMediaIds] = useState([]);
 
+    // AR primary: tracked as { source: 'existing' | 'new', id?: number, idx?: number }
+    const initialARId = listing.media?.find(m => m.is_ar_primary)?.id ?? null;
+    const [arPrimary, setArPrimary] = useState(
+        initialARId ? { source: 'existing', id: initialARId } : null
+    );
+
+    // Dimension state — split into W and H for the two numeric inputs
+    const parseInitialDim = (v) => v ? String(v) : '';
+    const [widthCm,  setWidthCm]  = useState(parseInitialDim(listing.physical_width_cm));
+    const [heightCm, setHeightCm] = useState(parseInitialDim(listing.physical_height_cm));
+
     const { data, setData, processing, errors } = useForm({
-        title:        listing.title || '',
-        description:  listing.description || '',
-        medium:       listing.medium || '',
-        dimensions:   listing.dimensions || '',
-        weight:       listing.weight || '',
-        price:        listing.price || '',
-        is_sold:      listing.is_sold || false,
-        cover_image:  null,
-        new_media:    [],
-        remove_media: [],
+        title:              listing.title        || '',
+        description:        listing.description  || '',
+        medium:             listing.medium       || '',
+        dimensions:         listing.dimensions   || '',
+        physical_width_cm:  listing.physical_width_cm  ? String(listing.physical_width_cm)  : '',
+        physical_height_cm: listing.physical_height_cm ? String(listing.physical_height_cm) : '',
+        weight:             listing.weight       || '',
+        price:              listing.price        || '',
+        is_sold:            listing.is_sold      || false,
+        cover_image:        null,
+        new_media:          [],
+        remove_media:       [],
     });
 
+    // ── Dimension helpers ────────────────────────────────────────
+    const buildDimensionLabel = (w, h) => {
+        if (w && h) return `${w} × ${h} cm`;
+        if (w) return `${w} cm`;
+        if (h) return `${h} cm`;
+        return '';
+    };
 
-    // ── Cover image handler ──────────────────────────────────
+    const handleWidthChange = (e) => {
+        const val = e.target.value.replace(/[^0-9.]/g, '');
+        setWidthCm(val);
+        setData(prev => ({
+            ...prev,
+            physical_width_cm: val,
+            dimensions: buildDimensionLabel(val, heightCm),
+        }));
+    };
+
+    const handleHeightChange = (e) => {
+        const val = e.target.value.replace(/[^0-9.]/g, '');
+        setHeightCm(val);
+        setData(prev => ({
+            ...prev,
+            physical_height_cm: val,
+            dimensions: buildDimensionLabel(widthCm, val),
+        }));
+    };
+
+    // ── Cover image handler ──────────────────────────────────────
     const handleCover = (e) => {
         const file = e.target.files[0];
         if (!file) return;
         setCoverPreview(URL.createObjectURL(file));
-        setCoverChanged(true);
         setData('cover_image', file);
     };
 
     const removeCoverPreview = () => {
         setCoverPreview(null);
-        setCoverChanged(true);
         setData('cover_image', null);
         if (coverRef.current) coverRef.current.value = '';
     };
 
-    // ── Gallery handlers ─────────────────────────────────────
+    // ── Gallery handlers ─────────────────────────────────────────
     const handleGallery = (e) => {
         const files = Array.from(e.target.files);
         const previews = files.map(file => ({
@@ -75,30 +112,66 @@ export default function EditListing({ listing }) {
     const removeExisting = (mediaId) => {
         setExistingMedia(prev => prev.filter(m => m.id !== mediaId));
         setRemoveMediaIds(prev => [...prev, mediaId]);
+        // If this was the AR primary, clear it
+        if (arPrimary?.source === 'existing' && arPrimary.id === mediaId) {
+            setArPrimary(null);
+        }
     };
 
     const removeNew = (index) => {
         setNewPreviews(prev => prev.filter((_, i) => i !== index));
         setData('new_media', data.new_media.filter((_, i) => i !== index));
+        if (arPrimary?.source === 'new' && arPrimary.idx === index) setArPrimary(null);
+        else if (arPrimary?.source === 'new' && arPrimary.idx > index) {
+            setArPrimary(prev => ({ ...prev, idx: prev.idx - 1 }));
+        }
     };
 
+    // AR primary toggle helpers
+    const toggleARExisting = (media) => {
+        if (media.type !== 'image') return;
+        setArPrimary(prev =>
+            prev?.source === 'existing' && prev.id === media.id
+                ? null
+                : { source: 'existing', id: media.id }
+        );
+    };
+
+    const toggleARNew = (index) => {
+        if (newPreviews[index]?.type !== 'image') return;
+        setArPrimary(prev =>
+            prev?.source === 'new' && prev.idx === index
+                ? null
+                : { source: 'new', idx: index }
+        );
+    };
+
+    const isARExisting = (media) => arPrimary?.source === 'existing' && arPrimary.id === media.id;
+    const isARNew      = (idx)   => arPrimary?.source === 'new' && arPrimary.idx === idx;
+
+    // ── Submit ───────────────────────────────────────────────────
     const submit = (e) => {
         e.preventDefault();
 
         const formData = new FormData();
         formData.append('_method', 'PUT');
-        formData.append('title', data.title);
+        formData.append('title',       data.title);
         formData.append('description', data.description || '');
-        formData.append('medium', data.medium);
-        formData.append('dimensions', data.dimensions || '');
-        formData.append('weight', data.weight || '');
-        formData.append('price', data.price);
-        formData.append('is_sold', data.is_sold ? '1' : '0');
+        formData.append('medium',      data.medium);
+        formData.append('dimensions',  data.dimensions || '');
+        formData.append('weight',      data.weight || '');
+        formData.append('price',       data.price);
+        formData.append('is_sold',     data.is_sold ? '1' : '0');
+        formData.append('physical_width_cm',  data.physical_width_cm  || '');
+        formData.append('physical_height_cm', data.physical_height_cm || '');
 
-
-        if (data.cover_image) {
-            formData.append('cover_image', data.cover_image);
+        // AR primary: only send if it's an existing media item
+        // (new media gets flagged after upload by a follow-up request)
+        if (arPrimary?.source === 'existing') {
+            formData.append('ar_primary_media_id', arPrimary.id);
         }
+
+        if (data.cover_image) formData.append('cover_image', data.cover_image);
 
         removeMediaIds.forEach(id => formData.append('remove_media[]', id));
         data.new_media.forEach(file => formData.append('new_media[]', file));
@@ -109,6 +182,10 @@ export default function EditListing({ listing }) {
     };
 
     const totalMedia = existingMedia.length + newPreviews.length;
+    const allImages  = [
+        ...existingMedia.filter(m => m.type === 'image'),
+        ...newPreviews.filter(p => p.type === 'image'),
+    ];
 
     return (
         <AppLayout title="Edit Listing">
@@ -177,73 +254,136 @@ export default function EditListing({ listing }) {
                                 <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-sienna/10">
                                     <Image size={20} className="text-sienna" />
                                 </div>
-                                <p className="text-xs font-semibold text-sienna">
-                                    Upload Cover Photo
-                                </p>
+                                <p className="text-xs font-semibold text-sienna">Upload Cover Photo</p>
                             </button>
                         )}
 
-                        <input
-                            ref={coverRef}
-                            type="file"
-                            accept="image/jpeg,image/png,image/webp,image/gif"
-                            className="hidden"
-                            onChange={handleCover}
-                        />
+                        <input ref={coverRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="hidden" onChange={handleCover} />
                         <InputError message={errors.cover_image} className="mt-1" />
                     </div>
 
                     {/* ═══ Gallery Media ═══════════════════════════════ */}
                     <div className="rounded-xl border border-border bg-surface p-6 shadow-xs space-y-4">
-                        <p className="text-xs font-semibold uppercase tracking-widest text-ink-muted">
-                            Gallery Photos & Videos
-                        </p>
+                        <div>
+                            <p className="text-xs font-semibold uppercase tracking-widest text-ink-muted mb-1">
+                                Gallery Photos &amp; Videos
+                            </p>
+                            <p className="text-sm text-ink-muted">
+                                Hover over a photo and tap the <ScanLine size={12} className="inline mb-0.5 text-violet-500" /> icon to mark it as the <strong>AR texture</strong> — the image buyers see projected on their wall.
+                            </p>
+                        </div>
 
                         <div className="grid grid-cols-3 gap-3">
                             {/* Existing media */}
-                            {existingMedia.map(media => (
-                                <div key={media.id} className="group relative aspect-square overflow-hidden rounded-lg border border-border bg-canvas">
-                                    {media.type === 'video' ? (
-                                        <div className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center">
-                                            <Video size={24} className="text-sienna" />
-                                            <p className="text-2xs font-medium text-ink-soft line-clamp-2">{media.name}</p>
-                                        </div>
-                                    ) : (
-                                        <img src={media.url} alt="" className="h-full w-full object-cover" />
-                                    )}
-                                    <button
-                                        type="button"
-                                        onClick={() => removeExisting(media.id)}
-                                        className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                            {existingMedia.map(media => {
+                                const isPrimary = isARExisting(media);
+                                const isImg     = media.type === 'image';
+                                return (
+                                    <div
+                                        key={media.id}
+                                        className={`group relative aspect-square overflow-hidden rounded-lg border-2 bg-canvas transition-all ${
+                                            isPrimary ? 'border-violet-500 shadow-md shadow-violet-200' : 'border-border'
+                                        }`}
                                     >
-                                        <X size={12} />
-                                    </button>
-                                </div>
-                            ))}
+                                        {media.type === 'video' ? (
+                                            <div className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center">
+                                                <Video size={24} className="text-sienna" />
+                                                <p className="text-2xs font-medium text-ink-soft line-clamp-2">{media.name}</p>
+                                            </div>
+                                        ) : (
+                                            <img src={media.url} alt="" className="h-full w-full object-cover" />
+                                        )}
+
+                                        {isPrimary && (
+                                            <span className="absolute bottom-1.5 left-1.5 flex items-center gap-1 rounded-full bg-violet-600 px-2 py-0.5 text-2xs font-bold text-white shadow">
+                                                <ScanLine size={10} /> AR
+                                            </span>
+                                        )}
+
+                                        <div className="absolute inset-0 flex items-start justify-between p-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                                            {isImg ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleARExisting(media)}
+                                                    title={isPrimary ? 'Remove as AR texture' : 'Use as AR texture'}
+                                                    className={`flex h-6 w-6 items-center justify-center rounded-full shadow transition-all ${
+                                                        isPrimary ? 'bg-violet-600 text-white' : 'bg-white/90 text-ink-muted hover:text-violet-600'
+                                                    }`}
+                                                >
+                                                    <ScanLine size={12} />
+                                                </button>
+                                            ) : <span />}
+
+                                            <button
+                                                type="button"
+                                                onClick={() => removeExisting(media.id)}
+                                                className="flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white shadow"
+                                            >
+                                                <X size={12} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
 
                             {/* New previews */}
-                            {newPreviews.map((preview, i) => (
-                                <div key={`new-${i}`} className="group relative aspect-square overflow-hidden rounded-lg border-2 border-dashed border-emerald-300 bg-emerald-50/30">
-                                    {preview.type === 'video' ? (
-                                        <div className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center">
-                                            <Video size={24} className="text-sienna" />
-                                            <p className="text-2xs">{preview.name}</p>
-                                        </div>
-                                    ) : (
-                                        <img src={preview.url} alt="" className="h-full w-full object-cover" />
-                                    )}
-                                    <span className="absolute left-1.5 top-1.5 rounded-full bg-emerald-500 px-2 py-0.5 text-2xs font-bold text-white">
-                                        New
-                                    </span>
-                                    <button
-                                        type="button"
-                                        onClick={() => removeNew(i)}
-                                        className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                            {newPreviews.map((preview, i) => {
+                                const isPrimary = isARNew(i);
+                                const isImg     = preview.type === 'image';
+                                return (
+                                    <div
+                                        key={`new-${i}`}
+                                        className={`group relative aspect-square overflow-hidden rounded-lg border-2 transition-all ${
+                                            isPrimary
+                                                ? 'border-violet-500 shadow-md shadow-violet-200'
+                                                : 'border-dashed border-emerald-300 bg-emerald-50/30'
+                                        }`}
                                     >
-                                        <X size={12} />
-                                    </button>
-                                </div>
-                            ))}
+                                        {preview.type === 'video' ? (
+                                            <div className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center">
+                                                <Video size={24} className="text-sienna" />
+                                                <p className="text-2xs">{preview.name}</p>
+                                            </div>
+                                        ) : (
+                                            <img src={preview.url} alt="" className="h-full w-full object-cover" />
+                                        )}
+
+                                        {isPrimary && (
+                                            <span className="absolute bottom-1.5 left-1.5 flex items-center gap-1 rounded-full bg-violet-600 px-2 py-0.5 text-2xs font-bold text-white shadow">
+                                                <ScanLine size={10} /> AR
+                                            </span>
+                                        )}
+                                        {!isPrimary && (
+                                            <span className="absolute left-1.5 top-1.5 rounded-full bg-emerald-500 px-2 py-0.5 text-2xs font-bold text-white">
+                                                New
+                                            </span>
+                                        )}
+
+                                        <div className="absolute inset-0 flex items-start justify-between p-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+                                            {isImg ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleARNew(i)}
+                                                    title={isPrimary ? 'Remove as AR texture' : 'Use as AR texture'}
+                                                    className={`flex h-6 w-6 items-center justify-center rounded-full shadow transition-all ${
+                                                        isPrimary ? 'bg-violet-600 text-white' : 'bg-white/90 text-ink-muted hover:text-violet-600'
+                                                    }`}
+                                                >
+                                                    <ScanLine size={12} />
+                                                </button>
+                                            ) : <span />}
+
+                                            <button
+                                                type="button"
+                                                onClick={() => removeNew(i)}
+                                                className="flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white shadow"
+                                            >
+                                                <X size={12} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
 
                             {/* Add more */}
                             {totalMedia < 10 && (
@@ -257,6 +397,22 @@ export default function EditListing({ listing }) {
                                 </button>
                             )}
                         </div>
+
+                        {/* AR status callout */}
+                        {arPrimary && (
+                            <div className="flex items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3.5 py-2.5">
+                                <ScanLine size={14} className="flex-shrink-0 text-violet-600" />
+                                <p className="text-xs font-medium text-violet-700">
+                                    {arPrimary.source === 'existing'
+                                        ? `Existing image #${arPrimary.id}`
+                                        : `New image "${newPreviews[arPrimary.idx]?.name}"`
+                                    } is set as the AR wall texture.
+                                    {arPrimary.source === 'new' && (
+                                        <span className="ml-1 text-violet-500">(Will be saved on update)</span>
+                                    )}
+                                </p>
+                            </div>
+                        )}
 
                         <input
                             ref={galleryRef}
@@ -274,6 +430,7 @@ export default function EditListing({ listing }) {
                             Painting Details
                         </p>
 
+                        {/* Title */}
                         <div>
                             <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-ink-soft">
                                 <Tag size={13} className="text-ink-muted" />
@@ -289,6 +446,7 @@ export default function EditListing({ listing }) {
                             <InputError message={errors.title} className="mt-1" />
                         </div>
 
+                        {/* Description */}
                         <div>
                             <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-ink-soft">
                                 <FileText size={13} className="text-ink-muted" />
@@ -303,12 +461,11 @@ export default function EditListing({ listing }) {
                             />
                             <div className="mt-1 flex items-center justify-between">
                                 <InputError message={errors.description} />
-                                <p className="text-xs text-ink-subtle">
-                                    {(data.description || '').length}/5000
-                                </p>
+                                <p className="text-xs text-ink-subtle">{(data.description || '').length}/5000</p>
                             </div>
                         </div>
 
+                        {/* Medium + Weight */}
                         <div className="grid grid-cols-2 gap-4">
                             <div>
                                 <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-ink-soft">
@@ -331,45 +488,71 @@ export default function EditListing({ listing }) {
 
                             <div>
                                 <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-ink-soft">
-                                    <Ruler size={13} className="text-ink-muted" />
-                                    Dimensions
+                                    <Weight size={13} className="text-ink-muted" />
+                                    Weight (kg)
                                 </label>
                                 <input
-                                    type="text"
+                                    type="number"
                                     className={inputCls}
-                                    value={data.dimensions}
-                                    onChange={e => setData('dimensions', e.target.value)}
-                                    placeholder="e.g. 24×36 in"
+                                    value={data.weight}
+                                    onChange={e => setData('weight', e.target.value)}
+                                    placeholder="e.g. 2.5"
+                                    min="0"
+                                    step="0.1"
                                 />
-                                <InputError message={errors.dimensions} className="mt-1" />
+                                <InputError message={errors.weight} className="mt-1" />
                             </div>
                         </div>
 
-                        {/* Weight */}
+                        {/* Physical Dimensions W × H */}
                         <div>
                             <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-ink-soft">
-                                <Weight size={13} className="text-ink-muted" />
-                                Weight (kg)
+                                <Ruler size={13} className="text-ink-muted" />
+                                Physical Dimensions (cm)
+                                <span className="ml-1.5 rounded-full bg-violet-100 px-2 py-0.5 text-2xs font-semibold text-violet-600">AR</span>
                             </label>
-                            <input
-                                type="number"
-                                className={inputCls}
-                                value={data.weight}
-                                onChange={e => setData('weight', e.target.value)}
-                                placeholder="e.g. 2.5"
-                                min="0"
-                                step="0.1"
-                            />
-                            <InputError message={errors.weight} className="mt-1" />
-                            <p className="mt-1 text-xs text-ink-subtle">Used for delivery logistics — helps drivers choose the right vehicle.</p>
+                            <div className="flex items-center gap-2">
+                                <div className="relative flex-1">
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        className={inputCls}
+                                        value={widthCm}
+                                        onChange={handleWidthChange}
+                                        placeholder="Width"
+                                    />
+                                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-ink-subtle">cm</span>
+                                </div>
+                                <span className="text-lg font-light text-ink-subtle">×</span>
+                                <div className="relative flex-1">
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        className={inputCls}
+                                        value={heightCm}
+                                        onChange={handleHeightChange}
+                                        placeholder="Height"
+                                    />
+                                    <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-ink-subtle">cm</span>
+                                </div>
+                            </div>
+                            {(widthCm || heightCm) && (
+                                <p className="mt-1.5 text-xs text-ink-muted">
+                                    Stored as: <span className="font-semibold text-ink">{data.dimensions}</span>
+                                </p>
+                            )}
+                            <InputError message={errors.physical_width_cm || errors.physical_height_cm} className="mt-1" />
+                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-subtle">
+                                <ScanLine size={11} className="text-violet-500" />
+                                Required for the "View on Your Wall" AR feature.
+                            </p>
                         </div>
-
                     </div>
 
                     {/* ═══ Pricing & Status ════════════════════════════ */}
                     <div className="rounded-xl border border-border bg-surface p-6 shadow-xs space-y-5">
                         <p className="text-xs font-semibold uppercase tracking-widest text-ink-muted">
-                            Pricing & Status
+                            Pricing &amp; Status
                         </p>
 
                         <div>
@@ -378,9 +561,7 @@ export default function EditListing({ listing }) {
                                 Price (₱) <span className="text-sienna">*</span>
                             </label>
                             <div className="relative">
-                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-medium text-ink-muted">
-                                    ₱
-                                </span>
+                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm font-medium text-ink-muted">₱</span>
                                 <input
                                     type="number"
                                     className={`${inputCls} pl-8`}

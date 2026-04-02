@@ -12,16 +12,38 @@ class ArtPost extends Model
         'user_id', 'title', 'description', 'medium',
         'dimensions', 'weight', 'price', 'is_for_sale', 'is_sold',
         'status', 'cover_image', 'views_count', 'likes_count', 'comments_count',
+        'physical_width_cm', 'physical_height_cm',
     ];
 
 
     protected function casts(): array
     {
         return [
-            'is_for_sale' => 'boolean',
-            'is_sold'     => 'boolean',
-            'price'       => 'decimal:2',
+            'is_for_sale'        => 'boolean',
+            'is_sold'            => 'boolean',
+            'price'              => 'decimal:2',
+            'physical_width_cm'  => 'decimal:2',
+            'physical_height_cm' => 'decimal:2',
         ];
+    }
+
+    /**
+     * Returns the URL of the media item flagged as the AR texture.
+     * Falls back to the first image in the gallery if none are flagged.
+     */
+    public function getArImageUrlAttribute(): ?string
+    {
+        $media = $this->relationLoaded('media') ? $this->media : $this->media()->get();
+
+        // 1st choice — explicitly flagged AR primary image
+        $primary = $media->where('is_ar_primary', true)->where('type', 'image')->first();
+        if ($primary) {
+            return $primary->url;
+        }
+
+        // Fallback — first image in the gallery
+        $first = $media->where('type', 'image')->first();
+        return $first?->url;
     }
 
     public function user(): BelongsTo

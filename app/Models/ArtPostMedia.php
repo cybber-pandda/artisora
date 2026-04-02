@@ -11,6 +11,11 @@ class ArtPostMedia extends Model
     protected $fillable = [
         'art_post_id', 'type', 'path',
         'thumbnail_path', 'original_name', 'size_bytes', 'sort_order',
+        'is_ar_primary',
+    ];
+
+    protected $casts = [
+        'is_ar_primary' => 'boolean',
     ];
 
     // ── Tell Laravel to include 'url' when serializing to JSON ───

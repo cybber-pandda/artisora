@@ -62,15 +62,17 @@ class ListingController extends Controller
     public function store(Request $request): RedirectResponse
     {
         $request->validate([
-            'title'       => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string', 'max:5000'],
-            'medium'      => ['required', 'string', 'max:100'],
-            'dimensions'  => ['nullable', 'string', 'max:100'],
-            'weight'      => ['nullable', 'numeric', 'min:0'],
-            'price'       => ['required', 'numeric', 'min:1', 'max:999999999999'],
-            'cover_image' => ['required', 'image', 'max:10240'],
-            'media'       => ['nullable', 'array', 'max:10'],
-            'media.*'     => [
+            'title'             => ['required', 'string', 'max:255'],
+            'description'       => ['nullable', 'string', 'max:5000'],
+            'medium'            => ['required', 'string', 'max:100'],
+            'dimensions'        => ['nullable', 'string', 'max:100'],
+            'weight'            => ['nullable', 'numeric', 'min:0'],
+            'price'             => ['required', 'numeric', 'min:1', 'max:999999999999'],
+            'physical_width_cm' => ['nullable', 'numeric', 'min:1', 'max:9999'],
+            'physical_height_cm'=> ['nullable', 'numeric', 'min:1', 'max:9999'],
+            'cover_image'       => ['required', 'image', 'max:10240'],
+            'media'             => ['nullable', 'array', 'max:10'],
+            'media.*'           => [
                 'required', 'file', 'max:102400',
                 function ($attribute, $value, $fail) {
                     $mime    = $value->getMimeType();
@@ -99,16 +101,18 @@ class ListingController extends Controller
             Storage::disk('s3')->put($coverPath, file_get_contents($coverFile), 'private');
 
             $post = ArtPost::create([
-                'user_id'     => Auth::id(),
-                'title'       => $request->title,
-                'description' => $request->description,
-                'medium'      => $request->medium,
-                'dimensions'  => $request->dimensions,
-                'weight'      => $request->weight,
-                'price'       => $request->price,
-                'is_for_sale' => true,
-                'status'      => 'published',
-                'cover_image' => $coverPath,
+                'user_id'            => Auth::id(),
+                'title'              => $request->title,
+                'description'        => $request->description,
+                'medium'             => $request->medium,
+                'dimensions'         => $request->dimensions,
+                'weight'             => $request->weight,
+                'price'              => $request->price,
+                'physical_width_cm'  => $request->physical_width_cm,
+                'physical_height_cm' => $request->physical_height_cm,
+                'is_for_sale'        => true,
+                'status'             => 'published',
+                'cover_image'        => $coverPath,
             ]);
 
 
@@ -130,6 +134,7 @@ class ListingController extends Controller
                         'original_name' => $file->getClientOriginalName(),
                         'size_bytes'    => $file->getSize(),
                         'sort_order'    => $index,
+                        'is_ar_primary' => false,
                     ]);
                 }
             }
@@ -147,22 +152,25 @@ class ListingController extends Controller
 
         return Inertia::render('Artist/EditListing', [
             'listing' => [
-                'id'              => $post->id,
-                'title'           => $post->title,
-                'description'     => $post->description,
-                'medium'          => $post->medium,
-                'dimensions'      => $post->dimensions,
-                'weight'          => $post->weight,
-                'price'           => $post->price,
-                'is_sold'         => $post->is_sold,
-                'cover_image_url' => $post->cover_image
+                'id'                 => $post->id,
+                'title'              => $post->title,
+                'description'        => $post->description,
+                'medium'             => $post->medium,
+                'dimensions'         => $post->dimensions,
+                'weight'             => $post->weight,
+                'price'              => $post->price,
+                'is_sold'            => $post->is_sold,
+                'physical_width_cm'  => $post->physical_width_cm  ? (float) $post->physical_width_cm  : null,
+                'physical_height_cm' => $post->physical_height_cm ? (float) $post->physical_height_cm : null,
+                'cover_image_url'    => $post->cover_image
                     ? $this->signedCoverUrl($post->cover_image)
                     : null,
-                'media'           => $post->media->map(fn ($m) => [
-                    'id'   => $m->id,
-                    'url'  => $m->url,
-                    'type' => $m->type,
-                    'name' => $m->original_name,
+                'media'              => $post->media->map(fn ($m) => [
+                    'id'           => $m->id,
+                    'url'          => $m->url,
+                    'type'         => $m->type,
+                    'name'         => $m->original_name,
+                    'is_ar_primary' => $m->is_ar_primary,
                 ]),
             ],
         ]);
@@ -175,29 +183,34 @@ class ListingController extends Controller
         abort_unless(Auth::id() === $post->user_id, 403);
 
         $request->validate([
-            'title'          => ['required', 'string', 'max:255'],
-            'description'    => ['nullable', 'string', 'max:5000'],
-            'medium'         => ['required', 'string', 'max:100'],
-            'dimensions'     => ['nullable', 'string', 'max:100'],
-            'weight'         => ['nullable', 'numeric', 'min:0'],
-            'price'          => ['required', 'numeric', 'min:1', 'max:999999999999'],
-            'is_sold'        => ['boolean'],
-            'cover_image'    => ['nullable', 'image', 'max:10240'],
-            'new_media'      => ['nullable', 'array', 'max:10'],
-            'new_media.*'    => ['file', 'max:102400'],
-            'remove_media'   => ['nullable', 'array'],
-            'remove_media.*' => ['integer'],
+            'title'             => ['required', 'string', 'max:255'],
+            'description'       => ['nullable', 'string', 'max:5000'],
+            'medium'            => ['required', 'string', 'max:100'],
+            'dimensions'        => ['nullable', 'string', 'max:100'],
+            'weight'            => ['nullable', 'numeric', 'min:0'],
+            'price'             => ['required', 'numeric', 'min:1', 'max:999999999999'],
+            'physical_width_cm' => ['nullable', 'numeric', 'min:1', 'max:9999'],
+            'physical_height_cm'=> ['nullable', 'numeric', 'min:1', 'max:9999'],
+            'is_sold'           => ['boolean'],
+            'ar_primary_media_id' => ['nullable', 'integer'],
+            'cover_image'       => ['nullable', 'image', 'max:10240'],
+            'new_media'         => ['nullable', 'array', 'max:10'],
+            'new_media.*'       => ['file', 'max:102400'],
+            'remove_media'      => ['nullable', 'array'],
+            'remove_media.*'    => ['integer'],
         ]);
 
         DB::transaction(function () use ($request, $post) {
             $updateData = [
-                'title'       => $request->title,
-                'description' => $request->description,
-                'medium'      => $request->medium,
-                'dimensions'  => $request->dimensions,
-                'weight'      => $request->weight,
-                'price'       => $request->price,
-                'is_sold'     => $request->boolean('is_sold'),
+                'title'              => $request->title,
+                'description'        => $request->description,
+                'medium'             => $request->medium,
+                'dimensions'         => $request->dimensions,
+                'weight'             => $request->weight,
+                'price'              => $request->price,
+                'is_sold'            => $request->boolean('is_sold'),
+                'physical_width_cm'  => $request->physical_width_cm,
+                'physical_height_cm' => $request->physical_height_cm,
             ];
 
 
@@ -243,8 +256,15 @@ class ListingController extends Controller
                         'original_name' => $file->getClientOriginalName(),
                         'size_bytes'    => $file->getSize(),
                         'sort_order'    => $currentCount + $index,
+                        'is_ar_primary' => false,
                     ]);
                 }
+            }
+
+            // Update AR primary flag
+            if ($request->filled('ar_primary_media_id')) {
+                $post->media()->update(['is_ar_primary' => false]);
+                $post->media()->where('id', $request->ar_primary_media_id)->where('type', 'image')->update(['is_ar_primary' => true]);
             }
         });
 
