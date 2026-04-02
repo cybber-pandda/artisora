@@ -32,10 +32,11 @@ export function launchAR(glbUrl, title = '', fallbackUrl = '') {
     // ── Android → Scene Viewer intent ────────────────────────────
     if (/Android/i.test(ua)) {
         const params = new URLSearchParams({
-            file:      glbUrl,
-            mode:      'ar_preferred',
-            resizable: 'false',   // ← locks to physical dimensions from GLB vertices
-            title:     title,
+            file:                        glbUrl,
+            mode:                        'ar_preferred',
+            resizable:                   'false',
+            enable_vertical_placement:   'true',   // ← enables WALL placement
+            title:                       title,
         });
 
         const fallback = encodeURIComponent(fallbackUrl || window.location.href);

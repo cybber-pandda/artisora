@@ -47,6 +47,14 @@ class ArModelController extends Controller
             $mimeType = 'image/jpeg';
         }
 
+        // ── Optimize texture for mobile AR GPUs ──────────────────
+        // Most mobile GPUs cap at 4096×4096 textures. If we send a
+        // 6000×8000px image, Scene Viewer aggressively downsamples it
+        // with terrible quality. Better to send an optimally sized
+        // JPEG that looks sharp on any device.
+        $imageData = $this->optimizeForAR($imageData, $mimeType);
+        $mimeType  = 'image/jpeg'; // optimizeForAR always outputs JPEG
+
         $widthM  = (float) $artPost->physical_width_cm  / 100;
         $heightM = (float) $artPost->physical_height_cm / 100;
 
@@ -62,6 +70,42 @@ class ArModelController extends Controller
             // Allow model-viewer and Scene Viewer to fetch cross-origin
             'Access-Control-Allow-Origin' => '*',
         ]);
+    }
+
+    // ── Image optimizer for AR textures ─────────────────────────────
+
+    private function optimizeForAR(string $imageData, string $mimeType): string
+    {
+        $maxDim = 4096; // mobile GPU texture limit
+
+        $src = @imagecreatefromstring($imageData);
+        if (!$src) {
+            // GD can't read it — return original bytes as-is
+            return $imageData;
+        }
+
+        $w = imagesx($src);
+        $h = imagesy($src);
+
+        // Only resize if either dimension exceeds the limit
+        if ($w > $maxDim || $h > $maxDim) {
+            $ratio = min($maxDim / $w, $maxDim / $h);
+            $newW  = (int) round($w * $ratio);
+            $newH  = (int) round($h * $ratio);
+
+            $dst = imagecreatetruecolor($newW, $newH);
+            imagecopyresampled($dst, $src, 0, 0, 0, 0, $newW, $newH, $w, $h);
+            imagedestroy($src);
+            $src = $dst;
+        }
+
+        // Encode as high-quality JPEG (95%)
+        ob_start();
+        imagejpeg($src, null, 95);
+        $output = ob_get_clean();
+        imagedestroy($src);
+
+        return $output;
     }
 
     // ── GLB builder ──────────────────────────────────────────────────
