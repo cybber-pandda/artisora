@@ -77,3 +77,18 @@ jobs:
           remote_port: ${{ secrets.SSH_PORT }}
           remote_user: ${{ secrets.SSH_USERNAME }}
           remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # ── Post-deploy: clear caches so new routes/config are registered ──────
+      - name: Clear Laravel caches
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/u205309581/domains/tantuco-ctc.store/public_html/artisora
+            php artisan route:clear
+            php artisan config:clear
+            php artisan view:clear
+            php artisan optimize

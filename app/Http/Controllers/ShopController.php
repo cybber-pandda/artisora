@@ -180,7 +180,7 @@ class ShopController extends Controller
             'productUrl'     => route('buyer.shop.show', $artPost->id),
             // Server-generated GLB with texture + physical size baked in (null when no dimensions set)
             'arModelUrl'     => ($artPost->physical_width_cm && $artPost->physical_height_cm)
-                                    ? route('ar.model', $artPost->id)
+                                    ? url('/ar/' . $artPost->id)
                                     : null,
             'inCart'         => \App\Models\CartItem::where('user_id', auth()->id())
                                     ->where('art_post_id', $artPost->id)
