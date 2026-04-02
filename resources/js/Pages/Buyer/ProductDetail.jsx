@@ -3,7 +3,7 @@ import AppLayout from '@/Layouts/AppLayout';
 import { Head, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ToastProvider, useToast } from '@/Components/Toast';
-import PaintingARView from '@/Components/PaintingARView';
+import HiddenARViewer from '@/Components/PaintingARView';
 import ARQRModal from '@/Components/ARQRModal';
 import {
     ArrowLeft, Heart, ShoppingCart, Eye, X,
@@ -223,20 +223,29 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
     const [inCart, setInCart]           = useState(initialInCart);
     const [cartLoading, setCartLoading] = useState(false);
     const [arModalOpen, setArModalOpen] = useState(false);
-    const [showARPanel, setShowARPanel] = useState(false);
+    const [arReady, setArReady]        = useState(false);
+    const arViewerRef                   = useState(null);  // stores model-viewer element
     const addToast                      = useToast();
 
-    // Mobile detection — AR can activate natively on mobile
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
         typeof navigator !== 'undefined' ? navigator.userAgent : ''
     );
 
     const hasARData = !!arModelUrl;
 
+    const handleARReady = (mv) => {
+        arViewerRef[1](mv);  // store the model-viewer element
+        setArReady(true);
+    };
+
     const handleARClick = () => {
-        if (isMobile) {
-            setShowARPanel(true);
+        if (isMobile && arViewerRef[0]) {
+            // One tap → straight into AR
+            arViewerRef[0].activateAR();
+        } else if (isMobile && !arReady) {
+            addToast('AR is still loading, please try again in a moment.', 'info');
         } else {
+            // Desktop → QR modal
             setArModalOpen(true);
         }
     };
@@ -296,29 +305,9 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                 {/* ── Main content grid ────────────────────────── */}
                 <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
 
-                    {/* Left: Gallery + AR Panel */}
-                    <div className="space-y-4">
+                    {/* Left: Gallery */}
+                    <div>
                         <ImageGallery media={product.media} />
-
-                        {/* AR viewer panel — revealed on mobile after button click */}
-                        <AnimatePresence>
-                            {showARPanel && hasARData && (
-                                <motion.div
-                                    initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
-                                    exit={{ opacity: 0, height: 0 }}
-                                    transition={{ duration: 0.35 }}
-                                    className="overflow-hidden"
-                                >
-                                    <PaintingARView
-                                        arModelUrl={arModelUrl}
-                                        widthCm={product.physical_width_cm}
-                                        heightCm={product.physical_height_cm}
-                                        productTitle={product.title}
-                                    />
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
                     </div>
 
                     {/* Right: Product info */}
@@ -421,14 +410,29 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                                 <button
                                     id="view-on-wall-btn"
                                     onClick={handleARClick}
-                                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-sienna/30 bg-sienna/5 py-3 text-sm font-bold text-sienna transition-all hover:border-sienna/60 hover:bg-sienna/10 active:scale-[0.98]"
+                                    disabled={isMobile && !arReady}
+                                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-sienna/30 bg-sienna/5 py-3 text-sm font-bold text-sienna transition-all hover:border-sienna/60 hover:bg-sienna/10 active:scale-[0.98] disabled:opacity-50"
                                 >
-                                    <ScanLine size={16} />
-                                    View on Your Wall
-                                    <span className="ml-1 rounded-full bg-sienna/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sienna">
-                                        AR
-                                    </span>
+                                    {isMobile && !arReady ? (
+                                        <>
+                                            <Loader2 size={16} className="animate-spin" />
+                                            Loading AR…
+                                        </>
+                                    ) : (
+                                        <>
+                                            <ScanLine size={16} />
+                                            {isMobile ? 'View on Your Wall' : 'View on Your Wall'}
+                                            <span className="ml-1 rounded-full bg-sienna/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sienna">
+                                                AR
+                                            </span>
+                                        </>
+                                    )}
                                 </button>
+                            )}
+                            {hasARData && product.physical_width_cm && product.physical_height_cm && (
+                                <p className="mt-1.5 text-center text-xs text-ink-muted">
+                                    Real size: <span className="font-semibold">{product.physical_width_cm} × {product.physical_height_cm} cm</span>
+                                </p>
                             )}
                         </div>
 
@@ -576,6 +580,16 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                 )}
             </div>
         </AppLayout>
+
+        {/* ── Hidden AR viewer — preloads GLB for one-tap AR ────── */}
+        {hasARData && (
+            <HiddenARViewer
+                arModelUrl={arModelUrl}
+                productTitle={product.title}
+                onReady={handleARReady}
+                onError={() => {}}
+            />
+        )}
 
         {/* ── Desktop QR Modal ──────────────────────────────────── */}
         <ARQRModal
