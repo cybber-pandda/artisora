@@ -1,9 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import AppLayout from '@/Layouts/AppLayout';
 import { Head, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ToastProvider, useToast } from '@/Components/Toast';
-import PaintingARView from '@/Components/PaintingARView';
+import { launchAR } from '@/Components/PaintingARView';
 import ARQRModal from '@/Components/ARQRModal';
 import {
     ArrowLeft, Heart, ShoppingCart, Eye, X,
@@ -223,24 +223,14 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
     const [inCart, setInCart]           = useState(initialInCart);
     const [cartLoading, setCartLoading] = useState(false);
     const [arModalOpen, setArModalOpen] = useState(false);
-    const [arActivate, setArActivate]   = useState(null); // fn to call activateAR()
     const addToast                      = useToast();
 
     const hasARData = !!arModelUrl;
 
-    const isMobile = typeof navigator !== 'undefined' &&
-        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
-    const handleARReady = useCallback(({ activate }) => {
-        setArActivate(() => activate);
-    }, []);
-
     const handleARClick = () => {
-        if (isMobile && arActivate) {
-            arActivate();
-        } else if (isMobile) {
-            addToast('AR is loading, try again in a moment.', 'info');
-        } else {
+        // Mobile → opens Scene Viewer / Quick Look directly
+        // Desktop → returns false, so we show QR modal
+        if (!launchAR(arModelUrl, product.title, productUrl)) {
             setArModalOpen(true);
         }
     };
@@ -565,17 +555,6 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                 )}
             </div>
         </AppLayout>
-
-        {/* ── AR Launcher (hidden, loads GLB eagerly) ────────── */}
-        {hasARData && (
-            <PaintingARView
-                arModelUrl={arModelUrl}
-                widthCm={product.physical_width_cm}
-                heightCm={product.physical_height_cm}
-                productTitle={product.title}
-                onReady={handleARReady}
-            />
-        )}
 
         {/* ── Desktop QR Modal ──────────────────────────────────── */}
         <ARQRModal
