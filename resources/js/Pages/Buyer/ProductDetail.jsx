@@ -3,7 +3,7 @@ import AppLayout from '@/Layouts/AppLayout';
 import { Head, Link } from '@inertiajs/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ToastProvider, useToast } from '@/Components/Toast';
-import { launchAR } from '@/Components/PaintingARView';
+import PaintingARPreview from '@/Components/PaintingARView';
 import ARQRModal from '@/Components/ARQRModal';
 import {
     ArrowLeft, Heart, ShoppingCart, Eye, X,
@@ -228,9 +228,12 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
     const hasARData = !!arModelUrl;
 
     const handleARClick = () => {
-        // Mobile → opens Scene Viewer / Quick Look directly
-        // Desktop → returns false, so we show QR modal
-        if (!launchAR(arModelUrl, product.title, productUrl)) {
+        // On mobile: scroll down to the AR preview where 'Place on Wall' lives
+        const el = document.getElementById('ar-preview-section');
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+            // Desktop fallback: QR modal
             setArModalOpen(true);
         }
     };
@@ -290,9 +293,21 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                 {/* ── Main content grid ────────────────────────── */}
                 <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
 
-                    {/* Left: Gallery */}
-                    <div>
+                    {/* Left: Gallery + AR Preview */}
+                    <div className="space-y-4">
                         <ImageGallery media={product.media} />
+
+                        {/* AR 3D Preview — visible model-viewer for WebXR wall placement */}
+                        {hasARData && (
+                            <div id="ar-preview-section">
+                                <PaintingARPreview
+                                    arModelUrl={arModelUrl}
+                                    widthCm={product.physical_width_cm}
+                                    heightCm={product.physical_height_cm}
+                                    productTitle={product.title}
+                                />
+                            </div>
+                        )}
                     </div>
 
                     {/* Right: Product info */}
@@ -403,11 +418,6 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                                         AR
                                     </span>
                                 </button>
-                            )}
-                            {hasARData && product.physical_width_cm && product.physical_height_cm && (
-                                <p className="mt-1.5 text-center text-xs text-ink-muted">
-                                    Real size: <span className="font-semibold">{product.physical_width_cm} × {product.physical_height_cm} cm</span>
-                                </p>
                             )}
                         </div>
 
