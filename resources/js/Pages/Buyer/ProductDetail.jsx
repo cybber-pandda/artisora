@@ -204,7 +204,7 @@ function ImageGallery({ media }) {
 }
 
 // ── Main Product Detail Page ───────────────────────────────────────
-export default function ProductDetail({ product, moreFromArtist, inCart: initialInCart = false, productUrl }) {
+export default function ProductDetail({ product, moreFromArtist, inCart: initialInCart = false, productUrl, arModelUrl }) {
     return (
         <ToastProvider>
             <ProductDetailInner
@@ -212,12 +212,13 @@ export default function ProductDetail({ product, moreFromArtist, inCart: initial
                 moreFromArtist={moreFromArtist}
                 initialInCart={initialInCart}
                 productUrl={productUrl}
+                arModelUrl={arModelUrl}
             />
         </ToastProvider>
     );
 }
 
-function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl }) {
+function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl, arModelUrl }) {
     const [wishlisted, setWishlisted]   = useState(false);
     const [inCart, setInCart]           = useState(initialInCart);
     const [cartLoading, setCartLoading] = useState(false);
@@ -230,7 +231,7 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
         typeof navigator !== 'undefined' ? navigator.userAgent : ''
     );
 
-    const hasARData = product.physical_width_cm && product.physical_height_cm && product.ar_image_url;
+    const hasARData = !!arModelUrl;
 
     const handleARClick = () => {
         if (isMobile) {
@@ -310,7 +311,7 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
                                     className="overflow-hidden"
                                 >
                                     <PaintingARView
-                                        arImageUrl={product.ar_image_url}
+                                        arModelUrl={arModelUrl}
                                         widthCm={product.physical_width_cm}
                                         heightCm={product.physical_height_cm}
                                         productTitle={product.title}

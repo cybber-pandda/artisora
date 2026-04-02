@@ -177,7 +177,11 @@ class ShopController extends Controller
         return Inertia::render('Buyer/ProductDetail', [
             'product'        => $product,
             'moreFromArtist' => $moreFromArtist,
-            'productUrl'     => route('buyer.shop.show', $artPost->id), // canonical URL for QR code
+            'productUrl'     => route('buyer.shop.show', $artPost->id),
+            // Server-generated GLB with texture + physical size baked in (null when no dimensions set)
+            'arModelUrl'     => ($artPost->physical_width_cm && $artPost->physical_height_cm)
+                                    ? route('ar.model', $artPost->id)
+                                    : null,
             'inCart'         => \App\Models\CartItem::where('user_id', auth()->id())
                                     ->where('art_post_id', $artPost->id)
                                     ->exists(),

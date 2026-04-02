@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\RegistrationController;
+use App\Http\Controllers\ArModelController;
 use App\Http\Controllers\CartController;
 use App\Http\Controllers\CheckoutController;
 use App\Http\Controllers\DeliveryController;
@@ -18,6 +19,9 @@ use Inertia\Inertia;
 
 // ── Welcome ───────────────────────────────────────────────────────
 Route::get('/', [PublicController::class, 'welcome'])->name('welcome');
+
+// ── AR model (public — Scene Viewer fetches GLB directly, no session) ─
+Route::get('/ar/{artPost}', [ArModelController::class, 'glb'])->name('ar.model');
 
 // ── Dashboard fallback ────────────────────────────────────────────
 Route::get('/dashboard', function () {
