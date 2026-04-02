@@ -204,19 +204,20 @@ function ImageGallery({ media }) {
 }
 
 // ── Main Product Detail Page ───────────────────────────────────────
-export default function ProductDetail({ product, moreFromArtist, inCart: initialInCart = false }) {
+export default function ProductDetail({ product, moreFromArtist, inCart: initialInCart = false, productUrl }) {
     return (
         <ToastProvider>
             <ProductDetailInner
                 product={product}
                 moreFromArtist={moreFromArtist}
                 initialInCart={initialInCart}
+                productUrl={productUrl}
             />
         </ToastProvider>
     );
 }
 
-function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
+function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl }) {
     const [wishlisted, setWishlisted]   = useState(false);
     const [inCart, setInCart]           = useState(initialInCart);
     const [cartLoading, setCartLoading] = useState(false);
@@ -579,7 +580,7 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart }) {
         <ARQRModal
             open={arModalOpen}
             onClose={() => setArModalOpen(false)}
-            url={typeof window !== 'undefined' ? window.location.href : ''}
+            url={productUrl || window.location.href}
             productTitle={product.title}
         />
         </>

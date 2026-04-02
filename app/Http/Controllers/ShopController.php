@@ -177,6 +177,7 @@ class ShopController extends Controller
         return Inertia::render('Buyer/ProductDetail', [
             'product'        => $product,
             'moreFromArtist' => $moreFromArtist,
+            'productUrl'     => route('buyer.shop.show', $artPost->id), // canonical URL for QR code
             'inCart'         => \App\Models\CartItem::where('user_id', auth()->id())
                                     ->where('art_post_id', $artPost->id)
                                     ->exists(),
