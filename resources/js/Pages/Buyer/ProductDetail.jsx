@@ -227,15 +227,16 @@ function ProductDetailInner({ product, moreFromArtist, initialInCart, productUrl
 
     const hasARData = !!arModelUrl;
 
+    const isMobile = typeof navigator !== 'undefined' &&
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
     const handleARClick = () => {
-        // On mobile: scroll down to the AR preview where 'Place on Wall' lives
+        // Always scroll to the preview section
         const el = document.getElementById('ar-preview-section');
-        if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } else {
-            // Desktop fallback: QR modal
-            setArModalOpen(true);
-        }
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        // On desktop, also open the QR modal so they can scan with their phone
+        if (!isMobile) setArModalOpen(true);
     };
 
     const handleCartToggle = async () => {
